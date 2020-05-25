@@ -386,20 +386,20 @@ impl<'a> Drop for UnitPropagator<'a> {
 	}
 }
 
-pub struct AsrProofChecker<'a> {
-	asr: DynAsrParser<'a>,
-	block: Block,
-	config: &'a CheckerConfig,
-}
-impl AsrProofChecker<'a> {
-	pub fn new<'b: 'a, 'c: 'a, C: AsrParser>(
-		asr: &'b mut C,
-		config: &'c CheckerConfig,
-	) -> AsrCoreChecker<'a> {
-		AsrCoreChecker::<'a> {
-			asr: DynAsrParser::<'a>::new(asr),
-			block: Block::new(),
-			config: config,
-		}
-	}
-}
+// pub struct AsrProofChecker<'a> {
+// 	asr: DynAsrParser<'a>,
+// 	block: Block,
+// 	config: &'a CheckerConfig,
+// }
+// impl AsrProofChecker<'a> {
+// 	pub fn new<'b: 'a, 'c: 'a, C: AsrParser>(
+// 		asr: &'b mut C,
+// 		config: &'c CheckerConfig,
+// 	) -> AsrCoreChecker<'a> {
+// 		AsrCoreChecker::<'a> {
+// 			asr: DynAsrParser::<'a>::new(asr),
+// 			block: Block::new(),
+// 			config: config,
+// 		}
+// 	}
+// }

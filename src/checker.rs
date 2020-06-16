@@ -9,18 +9,21 @@ use either::{
 };
 
 use crate::{
-	assignment::{Block, InsertionTest},
-	clausedb::{ClauseDb, ClauseIndex, ClauseSet, ClauseSetWriter, ClauseDbWriter, ClauseDbMeta, ClauseReference},
+	assignment::{Block, InsertionTest, BacktrackBlock, SubstitutionStack},
+	chaindb::{ChainDb},
+	clausedb::{ClauseDb, ClauseIndex, ClauseSet, ClauseSetWriter, ClauseDbWriter, ClauseDbMeta, ClauseReference, ClauseContainer, RawChainContainer},
 	input::{FilePosition, Positionable},
 	parser::{ParsingError, CnfParser, AsrParser, AsrInstructionKind, CnfHeaderStats},
 	results::{VerificationResult, VerificationFailure},
-	variable::{Variable, Literal},
+	unitpropagation::{UnitPropagator, PropagationResult},
+	variable::{Variable, Literal, MaybeVariable},
 };
 
 pub struct DynCnfParser<'a> {
 	parser: &'a mut dyn CnfParser
 }
 impl<'a> DynCnfParser<'a> {
+	const CnfHeader: [u8; 8] = [b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8];
 	pub fn new(mt: &'a mut dyn CnfParser) -> DynCnfParser<'a> {
 		DynCnfParser::<'a> { parser: mt }
 	}
@@ -47,6 +50,8 @@ pub struct DynAsrParser<'a> {
 	parser: &'a mut dyn AsrParser
 }
 impl<'a> DynAsrParser<'a> {
+	const CoreHeader: [u8; 8] = [b'c', b'o', b'r', b'e', 0u8, 0u8, 0u8, 0u8];
+	const ProofHeader: [u8; 8] = [b'p', b'r', b'o', b'o', b'f', 0u8, 0u8, 0u8];
 	pub fn new(mt: &'a mut dyn AsrParser) -> DynAsrParser<'a> {
 		DynAsrParser::<'a> { parser: mt }
 	}
@@ -76,330 +81,495 @@ impl<'a> Positionable for DynAsrParser<'a> {
 }
 
 pub struct CheckerStats {
-	pub declared_variables: Option<Variable>,
-	pub declared_clauses: usize,
-	pub max_variable: Option<Variable>,
+	pub max_variable: MaybeVariable,
 	pub max_index: Option<ClauseIndex>,
 	pub num_premises: usize,
 	pub num_cores: usize,
-	pub num_instructions: usize,
 	pub num_rups: usize,
 	pub num_srs: usize,
-	pub num_xrs: usize,
-	pub num_deletions: usize,
+	pub num_atomic_dels: usize,
+	pub num_del_instructions: usize
 }
 impl CheckerStats {
 	fn new() -> CheckerStats {
 		CheckerStats {
-			declared_variables: None,
-			declared_clauses: 0usize,
-			max_variable: None,
+			max_variable: MaybeVariable::None,
 			max_index: None,
 			num_premises: 0usize,
 			num_cores: 0usize,
-			num_instructions: 0usize,
 			num_rups: 0usize,
 			num_srs: 0usize,
-			num_xrs: 0usize,
-			num_deletions: 0usize,
+			num_atomic_dels: 0usize,
+			num_del_instructions: 0usize,
 		}
+	}
+	fn num_proof_instructions(&self) -> usize {
+		self.num_rups + self.num_srs + self.num_del_instructions
 	}
 }
 
 pub struct CheckerConfig {
-	pub cnf_file: Box<Path>,
-	pub asr_file: Box<Path>,
+	pub cnf_file: Option<Box<Path>>,
+	pub asr_file: Option<Box<Path>>,
 	pub asr_binary: bool,
 	pub check_core: bool,
 	pub check_proof: bool,
-	pub cnf_literal_repetition_allowed: bool,
-	pub cnf_tautology_allowed: bool,
-	pub asr_literal_repetition_allowed: bool,
-	pub asr_tautology_allowed: bool,
-	pub asr_mapping_repetition_allowed: bool,
-	pub asr_null_propagation_allowed: bool,
-	pub asr_overkill_propagation_allowed: bool,
+	pub permissive: bool,
 }
 
-pub struct CoreCheckerData {
-	pub set: ClauseSet,
-	pub db: ClauseDb,
-	pub stats: CheckerStats,
+pub struct AsrChecker<'a> {
+	cnf: &'a mut dyn CnfParser,
+	asr: &'a mut dyn AsrParser,
+	db: ClauseDb,
+	stats: CheckerStats,
+	config: CheckerConfig,
 }
 
-pub struct CnfChecker<'a> {
+enum InputPart {
+	Cnf,
+	Core,
+	Proof,
+}
+
+pub struct CoreChecker<'a> {
 	cnf: DynCnfParser<'a>,
-	block: Block,
+	asr: DynAsrParser<'a>,
+	db: &'a mut ClauseDb,
+	stats: &'a mut CheckerStats,
 	config: &'a CheckerConfig,
+	set: ClauseSet,
 }
-impl<'a> CnfChecker<'a> {
-	const CnfHeader: [u8; 8] = [b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8];
-	pub fn new<'b: 'a, 'c: 'a, C: CnfParser>(
-		cnf: &'b mut C,
-		config: &'c CheckerConfig,
-	) -> CnfChecker<'a> {
-		CnfChecker::<'a> {
-			cnf: DynCnfParser::<'a>::new(cnf),
-			block: Block::new(),
-			config: config,
+impl<'a> CoreChecker<'a> {
+	pub fn new<'b: 'a, 'c: 'b>(checker: &'b mut AsrChecker<'c>) -> CoreChecker<'a> {
+		CoreChecker::<'a> {
+			cnf: DynCnfParser::<'a>::new(&mut *checker.cnf),
+			asr: DynAsrParser::<'a>::new(&mut *checker.asr),
+			db: &mut checker.db,
+			stats: &mut checker.stats,
+			config: &checker.config,
+			set: ClauseSet::new(),
 		}
 	}
-	pub fn check(&mut self, data: &mut CoreCheckerData) -> VerificationResult<()> {
-		match self.skip_to_cnf_header()? {
-			Some(()) => (),
-			None => Err(VerificationFailure::missing_cnf_section(&self.cnf))?,
+	pub fn process(mut self) -> VerificationResult<()> {
+		if self.config.check_core {
+			self.check_cnf()?;
 		}
-		let hdstats = self.cnf.parse_cnf_header()?;
-		data.stats.declared_variables = hdstats.variables;
-		data.stats.declared_clauses = hdstats.clauses;
+		if self.config.check_core || self.config.check_proof {
+			self.check_asr()?;
+		}
+		Ok(())
+	}
+	fn check_cnf(&mut self) -> VerificationResult<()> {
+		let hdstats = match self.skip_to_cnf_header()? {
+			Some(hd) => hd,
+			None => self.error_missing_cnf_section()?,
+		};
+		self.check_cnf_formula()?;
+		match self.skip_to_cnf_header()? {
+			Some(_) => self.error_duplicated_cnf_section()?,
+			None => self.check_cnf_stats(&hdstats),
+		}
+	}
+	fn skip_to_cnf_header(&mut self) -> VerificationResult<Option<CnfHeaderStats>> {
+		loop { match self.cnf.skip_to_header()? {
+			Some(DynCnfParser::<'_>::CnfHeader) => break Ok(Some(self.cnf.parse_cnf_header()?)),
+			None => break Ok(None),
+			_ => (),
+		} }
+	}
+	fn check_cnf_formula(&mut self) -> VerificationResult<()> {
+		let mut block = Block::new();
 		while let Some(()) = self.cnf.parse_formula()? {
-			self.check_clause(data)?;
+			self.stats.num_premises += 1usize;
+			self.parse_set_clause(&mut block)?;
 		}
-		match self.skip_to_cnf_header()? {
-			Some(()) => Ok(()),
-			None => Err(VerificationFailure::duplicated_cnf_section(&self.cnf)),
-		}
+		Ok(())
 	}
-	fn skip_to_cnf_header(&mut self) -> VerificationResult<Option<()>> {
-		match self.cnf.skip_to_header()? {
-			Some(CnfChecker::<'a>::CnfHeader) => Ok(Some(())),
-			None => Ok(None),
-			Some(hd) => Err(VerificationFailure::invalid_section(&self.cnf, hd)),
-		}
-	}
-	fn check_clause<'b>(&mut self, data: &mut CoreCheckerData) -> VerificationResult<()> {
-		data.stats.num_premises += 1usize;
-		let mut writer = data.set.open(&mut self.block);
-		while let Some(lit) = self.cnf.parse_clause()? {
-			data.stats.max_variable |= unsafe { lit.variable_unchecked() };
-			match writer.write(lit) {
-				InsertionTest::Alright => (),
-				InsertionTest::Repeated => if self.config.cnf_literal_repetition_allowed {
-					()
-				} else {
-					let vec = writer.drain();
-					return self.invalid_premise(vec, &data.stats, lit);
+	fn parse_set_clause(&mut self, block: &mut Block) -> VerificationResult<()> {
+		let mut writer = self.set.open(block);
+		let lit = {
+			loop { match self.cnf.parse_clause()? {
+				Some(lit) => {
+					self.stats.max_variable |= unsafe { lit.variable_unchecked() };
+					match writer.write(lit) {
+						InsertionTest::Alright => (),
+						_ => break Some(lit),
+					}
 				},
-				InsertionTest::Conflict => if self.config.cnf_tautology_allowed {
-					writer.write_taut(lit);
-				} else {
-					let vec = writer.drain();
-					return self.invalid_premise(vec, &data.stats, lit);
-				},
+				None => break None,
+			} }
+		};
+		match lit {
+			None => writer.close(),
+			Some(l) => {
+				let cls = writer.extract();
+				self.error_invalid_clause(&block, cls, l, None)?;
 			}
 		}
 		Ok(())
 	}
-	fn invalid_premise<T>(&mut self, mut vec: Vec<Literal>, stats: &CheckerStats, rep: Literal) -> VerificationResult<T> {
-		vec.push(rep);
-		while let Some(lit) = self.cnf.parse_clause()? {
-			vec.push(lit)
-		}
-		if self.block.check(rep) {
-			Err(VerificationFailure::premise_repetition(&self.cnf, stats.num_premises, vec, rep))
+	fn check_cnf_stats(&self, hdstats: &CnfHeaderStats) -> VerificationResult<()> {
+		if self.stats.max_variable > hdstats.variables {
+			self.error_incorrect_num_variables(&hdstats)?
+		} else if self.stats.num_premises != hdstats.clauses {
+			self.error_incorrect_num_clauses(&hdstats)?
 		} else {
-			Err(VerificationFailure::premise_tautology(&self.cnf, stats.num_premises, vec, rep))
+			Ok(())
 		}
 	}
-}
-
-pub struct AsrCoreChecker<'a> {
-	asr: DynAsrParser<'a>,
-	block: Block,
-	config: &'a CheckerConfig,
-}
-impl<'a> AsrCoreChecker<'a> {
-	const ProofHeader: [u8; 8] = [b'p', b'r', b'o', b'o', b'f', 0u8, 0u8, 0u8];
-	const CoreHeader: [u8; 8] = [b'c', b'o', b'r', b'e', 0u8, 0u8, 0u8, 0u8];
-	pub fn new<'b: 'a, 'c: 'a, C: AsrParser>(
-		asr: &'b mut C,
-		config: &'c CheckerConfig,
-	) -> AsrCoreChecker<'a> {
-		AsrCoreChecker::<'a> {
-			asr: DynAsrParser::<'a>::new(asr),
-			block: Block::new(),
-			config: config,
+	fn check_asr(&mut self) -> VerificationResult<()> {
+		let mut block = BacktrackBlock::new();
+		match self.skip_to_asr_header()? {
+			Some(true) => self.check_asr_core(&mut block)?,
+			_ => self.error_missing_core_section()?,
 		}
-	}
-	pub fn check(&mut self, data: &mut CoreCheckerData) -> VerificationResult<()> {
-		match self.skip_to_header(Self::CoreHeader)? {
-			Some(()) => (),
-			None => Err(VerificationFailure::missing_core_section(&self.asr))?,
+		match self.skip_to_asr_header()? {
+			Some(false) => self.check_asr_proof(&mut block)?,
+			Some(true) => self.error_duplicated_core_section()?,
+			None => self.error_missing_proof_section()?,
 		}
-		loop { match self.asr.parse_core()? {
-			Some(id) => self.check_core(id, data)?,
-			None => break,
-		} }
-		match self.skip_to_header(Self::CoreHeader)? {
+		match self.skip_to_asr_header()? {
+			Some(false) => self.error_duplicated_proof_section()?,
+			Some(true) => self.error_duplicated_core_section()?,
 			None => Ok(()),
-			Some(()) => Err(VerificationFailure::duplicated_core_section(&self.asr))?,
 		}
 	}
-	fn skip_to_header(&mut self, header: [u8; 8]) -> VerificationResult<Option<()>> {
+	fn skip_to_asr_header(&mut self) -> VerificationResult<Option<bool>> {
 		loop { match self.asr.skip_to_header()? {
-			Some(hd) if hd == header => break Ok(Some(())),
+			Some(DynAsrParser::<'_>::CoreHeader) => break Ok(Some(true)),
+			Some(DynAsrParser::<'_>::ProofHeader) => break Ok(Some(false)),
 			None => break Ok(None),
-			Some(Self::ProofHeader) | Some(Self::CoreHeader) => (),
-			Some(hd) => Err(VerificationFailure::invalid_section(&self.asr, hd))?,
+			_ => (),
 		} }
 	}
-	pub fn check_core(&mut self, id: ClauseIndex, data: &mut CoreCheckerData) -> VerificationResult<()> {
-		data.stats.max_index |= id;
-		data.stats.num_cores += 1usize;
-		let mut writer: ClauseDbWriter<'_> = {
-			let opt = data.db.open(&mut self.block, id);
-			match opt {
-				Some(dbw) => Ok(dbw),
-				None => {
-					mem::drop(opt);
-					self.invalid_id(id, &data.stats)
+	fn check_asr_core(&mut self, block: &mut BacktrackBlock) -> VerificationResult<()> {
+		while let Some(id) = self.asr.parse_core()? {
+			self.stats.num_cores += 1usize;
+			self.parse_db_clause(id, unsafe { block.mut_block() }, false)?;
+			if self.config.check_core {
+				let rf = self.db.retrieve(id).unwrap();
+				let del = self.set.delete(&rf, unsafe { block.mut_block() });
+				match del {
+					Some(()) => (),
+					None => self.error_incorrect_core(id)?,
 				}
 			}
-		}?;
-		let mut taut: bool = false;
-		while let Some(lit) = self.asr.parse_clause()? {
-			data.stats.max_variable |= unsafe { lit.variable_unchecked() };
-			match writer.write(lit) {
-				InsertionTest::Alright => (),
-				InsertionTest::Repeated => if self.config.cnf_literal_repetition_allowed {
-					()
-				} else {
-					let mut vec = writer.drain();
-					return self.invalid_core(vec, &data.stats, lit);
-				},
-				InsertionTest::Conflict => if self.config.cnf_tautology_allowed {
-					writer.write_taut(lit);
-					taut = true;
-				} else {
-					let mut vec = writer.drain();
-					return self.invalid_core(vec, &data.stats, lit);
-				},
-			}
 		}
-		let meta = ClauseDbMeta {
-			tautology: taut,
+		Ok(())
+	}
+	fn check_asr_proof(&mut self, block: &mut BacktrackBlock) -> VerificationResult<()> {
+		let mut chain = ChainDb::new();
+		let mut subst = SubstitutionStack::new();
+		let mut refutation = false;
+		loop { match self.asr.parse_proof()? {
+			Some(AsrInstructionKind::Rup(id)) => {
+				self.stats.num_rups += 1usize;
+				let empty = unsafe { self.parse_db_clause(id, unsafe { block.mut_block() }, true) }?;
+				self.parse_db_chain(&mut chain, id, None)?;
+				let result = {
+					let mut up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst);
+					let result = up.propagate_rup(id, self.config.permissive).unwrap();
+					if result.error() || !result.conflict() {
+						up.freeze();
+					}
+					result
+				};
+				if result.error() || !result.conflict() {
+					self.error_incorrect_rup(&chain, id, result)?
+				}
+				refutation |= empty;
+			},
+			Some(AsrInstructionKind::Sr(id)) => {
+				self.stats.num_srs += 1usize;
+				let empty = unsafe { self.parse_db_clause(id, unsafe { block.mut_block() } , true) }?;
+				self.parse_witness(&mut subst)?;
+				if !self.check_witness(&mut subst, block, id) {
+					self.error_unsatisfied_sr(&subst, id)?
+				}
+				while let Some(lat) = self.asr.parse_chain()? {
+					self.parse_db_chain(&mut chain, id, Some(lat))?;
+				}
+				let (result, optcid) = {
+					let mut up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst);
+					let mut it = self.db.iter();
+					loop { match it.next() {
+						Some(cid) => {
+							let result = up.propagate_sr(id, cid, self.config.permissive).unwrap();
+							if result.error() || !result.conflict() {
+								up.freeze();
+								break (result, Some(cid));
+							}
+						},
+						None => break (PropagationResult::Stable, None)
+					} }
+				};
+				if result.error() || !result.conflict() {
+					self.error_incorrect_sr(&chain, &subst, id, optcid.unwrap(), result)?
+				}
+				refutation |= empty;
+			},
+			Some(AsrInstructionKind::Del) => {
+				self.stats.num_del_instructions += 1usize;
+				while let Some(id) = self.asr.parse_chain()? {
+					match self.db.delete(id) {
+						Some(()) => self.stats.num_atomic_dels += 1usize,
+						None => if !self.config.permissive {
+							self.error_missing_deletion(id)?
+						},
+					}
+				}
+			}
+			None => break,
+		} }
+		if !refutation {
+			self.error_unrefuted()?
+		}
+		Ok(())
+	}
+	fn parse_db_clause(&mut self, id: ClauseIndex, block: &mut Block, proof: bool) -> VerificationResult<bool> {
+		let mut empty = true;
+		let processed = match self.db.open(block, id) {
+			Some(mut writer) => loop { match self.asr.parse_clause()? {
+				Some(lit) => {
+					empty = false;
+					self.stats.max_variable |= unsafe { lit.variable_unchecked() };
+					match writer.write(lit) {
+						InsertionTest::Alright => (),
+						_ => break Some(Some((writer.extract(), lit))),
+					}
+				},
+				None => {
+					let meta = ClauseDbMeta {};
+					writer.close(meta);
+					break Some(None)
+				},
+			} },
+			None => None,
 		};
-		writer.close(meta);
-		let rf = data.db.retrieve(id).unwrap();
-		let del = data.set.delete(&rf, &mut self.block);
-		match del {
-			Some(()) => Ok(()),
-			None => self.incorrect_core(&rf, id, &data.stats),
+		match processed {
+			Some(None) => Ok(empty),
+			Some(Some((cls, lit))) => self.error_invalid_clause(&block, cls, lit, Some(proof))?,
+			None => self.error_conflict_id(id, proof)?,
 		}
 	}
-	fn invalid_core<T>(&mut self, mut vec: Vec<Literal>, stats: &CheckerStats, rep: Literal) -> VerificationResult<T> {
-		vec.push(rep);
-		while let Some(lit) = self.asr.parse_clause()? {
-			vec.push(lit);
-		}
-		if self.block.check(rep) {
-			Err(VerificationFailure::core_repetition(&self.asr, stats.num_cores, vec, rep))
-		} else {
-			Err(VerificationFailure::core_tautology(&self.asr, stats.num_cores, vec, rep))
-		}
-	}
-	fn invalid_id<T>(&mut self, id: ClauseIndex, stats: &CheckerStats) -> VerificationResult<T> {
-		let mut vec = Vec::<Literal>::new();
-		while let Some(lit) = self.asr.parse_clause()? {
-			vec.push(lit);
-		}
-		Err(VerificationFailure::conflict_core_id(&self.asr, stats.num_cores, id, vec))
-	}
-	fn incorrect_core<T>(&mut self, rf: &ClauseReference, id: ClauseIndex, stats: &CheckerStats) -> VerificationResult<T> {
-		let mut it = rf.iter();
-		let mut vec = Vec::<Literal>::new();
-		while let Some(&lit) = it.next() {
-			vec.push(lit);
-		}
-		Err(VerificationFailure::conflict_core_id(&self.asr, stats.num_cores, id, vec))
-	}
-}
-
-#[derive(Copy, Clone, Debug)]
-pub enum Propagation {
-	Conflict,
-	Proper(Literal),
-	Incorrect,
-}
-impl Propagation {
-	pub const fn new() -> Propagation {
-		Propagation::Conflict
-	}
-}
-impl BitOr<Literal> for Propagation {
-	type Output = Propagation;
-	fn bitor(self, lit: Literal) -> Propagation {
-		match self {
-			Propagation::Conflict => Propagation::Proper(lit),
-			_ => Propagation::Incorrect,
-		}
-	}
-}
-impl BitOrAssign<Literal> for Propagation {
-	fn bitor_assign(&mut self, lit: Literal) {
-		match self {
-			Propagation::Conflict => *self = Propagation::Proper(lit),
-			_ => *self = Propagation::Incorrect,
-		}
-	}
-}
-
-pub struct UnitPropagator<'a> {
-	block: &'a mut Block,
-	stack: &'a mut Vec<Literal>,
-}
-impl<'a> UnitPropagator<'a> {
-	pub fn new<'b: 'a, 'c: 'a>(block: &'b mut Block, stack: &'c mut Vec<Literal>) -> UnitPropagator<'a> {
-		UnitPropagator::<'a> {
-			block: block,
-			stack: stack,
-		}
-	}
-	pub fn initialized<'b: 'a, 'c: 'a, 'd: 'a, I: Iterator<Item = &'d Literal>>(block: &'b mut Block, stack: &'c mut Vec<Literal>, it: I) -> UnitPropagator<'a> {
-		let mut up = UnitPropagator::new(block, stack);
-		for &lit in it {
-			up.block.set(lit);
-			up.stack.push(lit);
-		}
-		up
-	}
-	pub fn propagate(&mut self, rf: &ClauseReference) -> Option<Propagation> {
-		let mut prop = Propagation::new();
-		for &lit in rf.iter() {
-			let test = self.block.set(lit);
-			match test {
-				InsertionTest::Conflict => (),
-				InsertionTest::Alright => {
-					self.stack.push(lit);
-					prop |= lit;
-				},
-				InsertionTest::Repeated => None?,
+	fn parse_witness(&mut self, subst: &mut SubstitutionStack) -> VerificationResult<()> {
+		while let Some((var, lit)) = self.asr.parse_witness()? {
+			match subst.set(var, lit) {
+				InsertionTest::Alright => (),
+				_ => self.error_invalid_witness(subst, var, lit)?,
 			}
 		}
-		Some(prop)
+		Ok(())
+	}
+	fn parse_db_chain(&mut self, chain: &mut ChainDb, id: ClauseIndex, latid: Option<ClauseIndex>) -> VerificationResult<()> {
+		match latid {
+			Some(lid) => if self.db.retrieve(lid).is_none() || id == lid {
+				self.error_missing_lateral_sr(id, lid)?;
+			},
+			None => (),
+		}
+		let repeated = {
+			match chain.open(latid) {
+				Some(mut chw) => {
+					while let Some(id) = self.asr.parse_chain()? {
+						chw.write(id);
+					}
+					chw.close();
+					false
+				},
+				None => true,
+			}
+		};
+		if repeated {
+			self.error_repeated_lateral_sr(chain, id, latid.unwrap())
+		} else {
+			Ok(())
+		}
+	}
+	fn check_witness(&mut self, subst: &mut SubstitutionStack, block: &mut BacktrackBlock, id: ClauseIndex) -> bool {
+		let rf = self.db.retrieve(id).unwrap();
+		let mut it = rf.iter();
+		let result = loop { match it.next() {
+			Some(lit) => match block.set(lit.complement()) {
+				InsertionTest::Conflict => break false,
+				_ => (),
+			},
+			None => break true,
+		} };
+		block.clear();
+		subst.clear();
+		result
+	}
+	fn error_missing_cnf_section<T>(&self) -> VerificationResult<T> {
+		Err(VerificationFailure::missing_cnf_section(self.cnf.position().clone()))
+	}
+	fn error_missing_core_section<T>(&self) -> VerificationResult<T> {
+		Err(VerificationFailure::missing_core_section(self.asr.position().clone()))
+	}
+	fn error_missing_proof_section<T>(&self) -> VerificationResult<T> {
+		Err(VerificationFailure::missing_proof_section(self.asr.position().clone()))
+	}
+	fn error_duplicated_cnf_section<T>(&self) -> VerificationResult<T> {
+		Err(VerificationFailure::duplicated_cnf_section(self.cnf.position().clone()))
+	}
+	fn error_duplicated_core_section<T>(&self) -> VerificationResult<T> {
+		Err(VerificationFailure::duplicated_core_section(self.cnf.position().clone()))
+	}
+	fn error_duplicated_proof_section<T>(&self) -> VerificationResult<T> {
+		Err(VerificationFailure::duplicated_proof_section(self.cnf.position().clone()))
+	}
+	fn error_incorrect_num_variables<T>(&self, hdstats: &CnfHeaderStats) -> VerificationResult<T> {
+		let pos = self.cnf.position().clone();
+		let vars = self.stats.max_variable;
+		let stat = hdstats.variables;
+		Err(VerificationFailure::incorrect_num_variables(pos, vars, stat))
+	}
+	fn error_incorrect_num_clauses<T>(&self, hdstats: &CnfHeaderStats) -> VerificationResult<T> {
+		let pos = self.cnf.position().clone();
+		let cls = self.stats.num_premises;
+		let stat = hdstats.clauses;
+		Err(VerificationFailure::incorrect_num_clauses(pos, cls, stat))
+	}
+	fn error_invalid_clause<T>(&mut self, block: &Block, mut clause: ClauseContainer, lit: Literal, proof: Option<bool>) -> VerificationResult<T> {
+		fn cnf<'b>(cc: &mut CoreChecker<'b>) -> VerificationResult<Option<Literal>> {
+			cc.cnf.parse_clause()
+		}
+		fn asr<'b>(cc: &mut CoreChecker<'b>) -> VerificationResult<Option<Literal>> {
+			cc.asr.parse_clause()
+		}
+		let pos = match proof {
+			None => self.cnf.position().clone(),
+			Some(_) => self.asr.position().clone(),
+		};
+		let f = match proof {
+			None => cnf,
+			Some(_) => asr,
+		};
+		let num = match proof {
+			None => self.stats.num_premises,
+			Some(false) => self.stats.num_cores,
+			Some(true) => self.stats.num_proof_instructions(),
+		};
+		clause.0.push(lit);
+		while let Some(l) = f(self)? {
+			clause.0.push(l);
+		}
+		match (proof, block.check(lit)) {
+			(None, true) => Err(VerificationFailure::premise_repetition(pos, num, clause, lit)),
+			(None, false) => Err(VerificationFailure::premise_tautology(pos, num, clause, lit)),
+			(Some(false), true) => Err(VerificationFailure::core_repetition(pos, num, clause, lit)),
+			(Some(false), false) => Err(VerificationFailure::core_tautology(pos, num, clause, lit)),
+			(Some(true), true) => Err(VerificationFailure::inference_repetition(pos, num, clause, lit)),
+			(Some(true), false) => Err(VerificationFailure::inference_tautology(pos, num, clause, lit)),
+		}
+	}
+	fn error_invalid_witness<T>(&mut self, subst: &mut SubstitutionStack, var: Variable, lit: Literal) -> VerificationResult<T> {
+		let mut witness = subst.extract();
+		witness.0.push((var, lit));
+		while let Some((v, l)) = self.asr.parse_witness()? {
+			witness.0.push((v, l));
+		}
+		let num = self.stats.num_proof_instructions();
+		let pos = self.asr.position().clone();
+		match subst.set(var, lit) {
+			InsertionTest::Repeated => Err(VerificationFailure::witness_repetition(pos, num, witness)),
+			_ => Err(VerificationFailure::witness_inconsistency(pos, num, witness)),
+		}
+	}
+	fn error_conflict_id<T>(&mut self, id: ClauseIndex, proof: bool) -> VerificationResult<T> {
+		let pos = self.asr.position().clone();
+		let cls = self.db.extract(id).unwrap();
+		let num = if proof {
+			self.stats.num_proof_instructions()
+		} else {
+			self.stats.num_cores
+		};
+		if proof {
+			Err(VerificationFailure::conflict_inference_id(pos, num, id, cls))
+		} else {
+			Err(VerificationFailure::conflict_core_id(pos, num, id, cls))
+		}
+	}
+	fn error_incorrect_core<T>(&mut self, id: ClauseIndex) -> VerificationResult<T> {
+		let cls = self.db.extract(id).unwrap();
+		let num = self.stats.num_cores;
+		let pos = self.asr.position().clone();
+		Err(VerificationFailure::incorrect_core(pos, num, id, cls))
+	}
+	fn error_incorrect_rup<T>(&mut self, chain: &ChainDb, id: ClauseIndex, result: PropagationResult) -> VerificationResult<T> {
+		let pos = self.asr.position().clone();
+		let num = self.stats.num_proof_instructions();
+		let cls = self.db.extract(id).unwrap();
+		let chn = chain.retrieve(None).unwrap();
+		let idchn = self.db.extract_chain(chn, result.cutoff()).unwrap();
+		if result.missing() {
+			let issue = chn.get(result.cutoff()).unwrap();
+			Err(VerificationFailure::missing_rup(pos, num, cls, *issue, idchn))
+		} else if result.null() {
+			let issue = chn.get(result.cutoff()).unwrap();
+			let issuecls = self.db.extract(*issue).unwrap();
+			Err(VerificationFailure::null_rup(pos, num, cls, *issue, issuecls, idchn))
+		} else {
+			Err(VerificationFailure::unchained_rup(pos, num, cls, idchn))
+		}
+	}
+	fn error_incorrect_sr<T>(&mut self, chain: &ChainDb, subst: &SubstitutionStack, id: ClauseIndex, latid: ClauseIndex, result: PropagationResult) -> VerificationResult<T> {
+		let pos = self.asr.position().clone();
+		let num = self.stats.num_proof_instructions();
+		let wtn = subst.extract();
+		let cls = self.db.extract(id).unwrap();
+		let latcls = self.db.extract(latid).unwrap();
+		let chn = chain.extract(Some(latid));
+		let idchn = self.db.extract_chain(&chn, result.cutoff()).unwrap();
+		if result.missing() {
+			let issue = chn.get(result.cutoff()).unwrap();
+			Err(VerificationFailure::missing_sr(pos, num, cls, latid, latcls, wtn, *issue, idchn))
+		} else if result.null() {
+			let issue = chn.get(result.cutoff()).unwrap();
+			let issuecls = self.db.extract(*issue).unwrap();
+			Err(VerificationFailure::null_sr(pos, num, cls, latid, latcls, wtn, *issue, issuecls, idchn))
+		} else if chain.exists(latid) {
+			Err(VerificationFailure::unchained_sr(pos, num, cls, latid, latcls, wtn, idchn))
+		} else {
+			Err(VerificationFailure::missing_suffix_sr(pos, num, cls, wtn, latid, latcls))
+		}
+	}
+	fn error_unsatisfied_sr<T>(&mut self, subst: &SubstitutionStack, id: ClauseIndex) -> VerificationResult<T> {
+		let pos = self.asr.position().clone();
+		let num = self.stats.num_proof_instructions();
+		let cls = self.db.extract(id).unwrap();
+		let wtn = subst.extract();
+		Err(VerificationFailure::unsatisfied_sr(pos, num, cls, wtn))
+	}
+	fn error_missing_lateral_sr<T>(&mut self, id: ClauseIndex, latid: ClauseIndex) -> VerificationResult<T> {
+		let pos = self.asr.position().clone();
+		let num = self.stats.num_proof_instructions();
+		let cls = self.db.extract(id).unwrap();
+		let mut chn = Vec::<ClauseIndex>::new();
+		while let Some(cid) = self.asr.parse_chain()? {
+			chn.push(cid);
+		}
+		Err(VerificationFailure::missing_lateral_sr(pos, num, cls, latid, RawChainContainer(chn)))
+	}
+	fn error_repeated_lateral_sr<T>(&mut self, chain: &ChainDb, id: ClauseIndex, latid: ClauseIndex) -> VerificationResult<T> {
+		let pos = self.asr.position().clone();
+		let num = self.stats.num_proof_instructions();
+		let cls = self.db.extract(id).unwrap();
+		let latcls = self.db.extract(latid).unwrap();
+		let chn1 = chain.extract(Some(latid));
+		let mut chn2 = Vec::<ClauseIndex>::new();
+		while let Some(cid) = self.asr.parse_chain()? {
+			chn2.push(cid);
+		}
+		Err(VerificationFailure::repeated_lateral_sr(pos, num, cls, latid, latcls, RawChainContainer(chn1), RawChainContainer(chn2)))
+	}
+	fn error_missing_deletion<T>(&mut self, id: ClauseIndex) -> VerificationResult<T> {
+		let pos = self.asr.position().clone();
+		let num = self.stats.num_proof_instructions();
+		Err(VerificationFailure::missing_deletion(pos, num, id))
+	}
+	fn error_unrefuted<T>(&mut self) -> VerificationResult<T> {
+		let pos = self.asr.position().clone();
+		Err(VerificationFailure::unrefuted(pos))
 	}
 }
-impl<'a> Drop for UnitPropagator<'a> {
-	fn drop(&mut self) {
-		self.block.clear_iter(self.stack.iter());
-		self.stack.clear();
-	}
-}
-
-// pub struct AsrProofChecker<'a> {
-// 	asr: DynAsrParser<'a>,
-// 	block: Block,
-// 	config: &'a CheckerConfig,
-// }
-// impl AsrProofChecker<'a> {
-// 	pub fn new<'b: 'a, 'c: 'a, C: AsrParser>(
-// 		asr: &'b mut C,
-// 		config: &'c CheckerConfig,
-// 	) -> AsrCoreChecker<'a> {
-// 		AsrCoreChecker::<'a> {
-// 			asr: DynAsrParser::<'a>::new(asr),
-// 			block: Block::new(),
-// 			config: config,
-// 		}
-// 	}
-// }

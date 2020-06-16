@@ -144,7 +144,10 @@ impl<'a> ChunkDbWriter<'a> {
             count: 1u32,
             size: self.count
         }   
-    }
+	}
+	pub fn length(&self) -> usize {
+		(self.count - 1u32) as usize
+	}
 }
 impl<'a> Drop for ChunkDbWriter<'a> {
     fn drop(&mut self) {
@@ -206,6 +209,7 @@ impl<'a> Iterator for ChunkDbIterator<'a> {
 	}
 }
 
+#[cfg(test)]
 mod test {
 	use rand::{self, Rng};
 	use crate::{

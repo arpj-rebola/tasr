@@ -1,6 +1,7 @@
 use std::{
+	cmp::{Ordering},
 	convert::{TryFrom},
-	fmt::{self, Formatter, Debug},
+	fmt::{self, Formatter, Debug, Display},
 	ops::{BitOr, BitOrAssign},
 };
 use rand::{Rng,
@@ -18,6 +19,7 @@ pub struct Variable {
 }
 impl Variable {
 	pub const MaxValue: i64 = (u32::max_value() as i64) >> 1;
+	pub const MaxIndex: usize = ((u32::max_value() >> 1) - 1u32) as usize;
 	pub const MaxVariable: Variable = Variable { val: u32::max_value() };
 	pub const MinVariable: Variable = Variable { val: 2u32 };
     pub(crate) const fn new(val: u32) -> Variable {
@@ -34,6 +36,9 @@ impl Variable {
 	}
 	pub fn index(&self) -> usize {
 		((self.val >> 1) - 1u32) as usize
+	}
+	pub const fn next(&self) -> Variable {
+		Variable::new(self.val + 2u32)
 	}
 }
 impl TryFrom<i64> for Variable {
@@ -59,8 +64,18 @@ impl TryFrom<VbeLexeme> for Variable {
 }
 impl PartialEq for Variable {
 	fn eq(&self, oth: &Variable) -> bool {
-		self.val & !1u32 == oth.val & !1u32
+		self.val | 1u32 == oth.val | 1u32
 	}
+}
+impl PartialOrd for Variable {
+    fn partial_cmp(&self, oth: &Variable) -> Option<Ordering> {
+        Some(self.cmp(oth))
+    }
+}
+impl Ord for Variable {
+    fn cmp(&self, oth: &Variable) -> Ordering {
+        (self.val | 1u32).cmp(&(oth.val | 1u32))
+    }
 }
 impl Hashable32 for Variable {
 	fn hash<H: Hasher32>(&self, hs: &mut H) {
@@ -78,20 +93,73 @@ impl BitOrAssign for Variable {
 		self.val = self.val.max(var.val)
 	}
 }
-impl BitOr<Variable> for Option<Variable> {
-	type Output = Option<Variable>;
-	fn bitor(self, var: Variable) -> Option<Variable> {
-		self.map_or_else(|| Some(var), |x| Some(x | var))
-	}
-}
-impl BitOrAssign<Variable> for Option<Variable> {
-	fn bitor_assign(&mut self, var: Variable) {
-		self.as_mut().map(|x| x.bitor_assign(var));
-	}
-}
 impl Debug for Variable {
 	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
 		write!(f, "{}", self.val >> 1usize)
+	}
+}
+impl Display for Variable {
+	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.val >> 1usize)
+	}
+}
+
+#[derive(Copy, Clone)]
+pub struct MaybeVariable {
+	val: u32
+}
+impl MaybeVariable {
+	pub const None: MaybeVariable = MaybeVariable { val: 0u32 };
+}
+impl From<Variable> for MaybeVariable {
+	fn from(var: Variable) -> MaybeVariable {
+		MaybeVariable { val: var.val }
+	}
+}
+impl TryFrom<i64> for MaybeVariable {
+	type Error = i64;
+	fn try_from(num: i64) -> Result<MaybeVariable, i64> {
+		if num > 0i64 && num <= Variable::MaxValue {
+			Ok(MaybeVariable { val: (num as u32) << 1 })
+		} else if num < 0i64 && num >= -Variable::MaxValue {
+			Ok(MaybeVariable { val: (-num as u32) << 1 })
+		} else if num == 0i64 {
+			Ok(MaybeVariable::None)
+		} else {
+			Err(num)
+		}
+	}
+}
+impl BitOr<Variable> for MaybeVariable {
+	type Output = MaybeVariable;
+	fn bitor(self, var: Variable) -> MaybeVariable {
+		MaybeVariable { val: u32::max(self.val, var.val) }
+	}
+}
+impl BitOrAssign<Variable> for MaybeVariable {
+	fn bitor_assign(&mut self, var: Variable) {
+		self.val = u32::max(self.val, var.val)
+	}
+}
+impl PartialEq for MaybeVariable {
+	fn eq(&self, oth: &MaybeVariable) -> bool {
+		self.val | 1u32 == oth.val | 1u32
+	}
+}
+impl Eq for MaybeVariable {}
+impl PartialOrd for MaybeVariable {
+	fn partial_cmp(&self, oth: &MaybeVariable) -> Option<Ordering> {
+		Some(self.cmp(oth))
+	}
+}
+impl Ord for MaybeVariable {
+	fn cmp(&self, oth: &MaybeVariable) -> Ordering {
+		(self.val | 1u32).cmp(&(oth.val | 1u32))
+	}
+}
+impl Display for MaybeVariable {
+	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.val >> 1)
 	}
 }
 
@@ -144,6 +212,13 @@ impl Literal {
 		};
 		(self.variable_unchecked(), atom)
 	}
+	pub fn split(&self) -> Option<(Variable, bool)> {
+		if self.proper() {
+			unsafe { Some((self.variable_unchecked(), self.positive())) }
+		} else {
+			None
+		}
+	}
 	pub fn variable(&self) -> Option<Variable> {
 		if self.proper() {
 			unsafe { Some(self.variable_unchecked()) }
@@ -191,10 +266,27 @@ impl Hashable32 for Literal {
 	}
 }
 impl Debug for Literal {
-	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		let pref : &str = if self.val & 1u32 == 1u32 { "-" } else { "+" };
 		let num : u32 = self.val >> 1usize ;
 		write!(f, "{}{}", pref , num)
+	}
+}
+impl Display for Literal {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		if self.val > 1u32 {
+			if self.val & 1u32 == 0u32 {
+				write!(f, "{}", self.val >> 1)
+			} else {
+				write!(f, "-{}", self.val >> 1)
+			}
+		} else {
+			if self.val == 0u32 {
+				write!(f, "t")
+			} else {
+				write!(f, "f")
+			}
+		}
 	}
 }
 

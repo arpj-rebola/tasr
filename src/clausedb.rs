@@ -1,33 +1,92 @@
 use std::{
 	convert::{TryFrom},
-	fmt::{self, Debug, Formatter},
+	fmt::{self, Debug, Formatter, Display},
+	iter::{Enumerate},
 	mem::{self, ManuallyDrop},
 	ops::{BitOr, BitOrAssign},
+	slice::{Iter},
 };
 
 use crate::{
 	assignment::{Block, InsertionTest},
 	hasher::{Hasher32, Hashable32, AmxHasher, UnwindHasher},
 	lexer::{VbeLexeme},
-	variable::{Literal},
+	variable::{Literal, Variable},
 	chunkdb::{DbAddress, ChunkDb, ChunkDbReference, ChunkDbWriter, ChunkDbIterator},
 };
 
+pub struct ClauseContainer(pub Vec<Literal>);
+impl Display for ClauseContainer {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		let mut first = false;
+		write!(f, "[")?;
+		for lit in &self.0 {
+			if first {
+				write!(f, ", ")?;
+			} else {
+				first = true;
+			}
+			write!(f, "{}", lit)?;
+		}
+		write!(f, "]")
+	}
+}
+
+pub struct ChainContainer(pub Vec<(ClauseIndex, ClauseContainer)>);
+impl Display for ChainContainer {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		for (index, clause) in &self.0 {
+			write!(f, "{}: {}\n", index, clause)?;
+		}
+		Ok(())
+	}
+}
+
+pub struct RawChainContainer(pub Vec<ClauseIndex>);
+impl Display for RawChainContainer {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		let mut first = false;
+		write!(f, "(")?;
+		for lit in &self.0 {
+			if first {
+				write!(f, ", ")?;
+			} else {
+				first = true;
+			}
+			write!(f, "{}", lit)?;
+		}
+		write!(f, ")")
+	}
+}
+
+pub struct WitnessContainer(pub Vec<(Variable, Literal)>);
+impl Display for WitnessContainer {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		let mut first = false;
+		write!(f, "{{")?;
+		for (var, lit) in &self.0 {
+			if first {
+				write!(f, ", ")?;
+			} else {
+				first = true;
+			}
+			write!(f, "{} -> {}", var, lit)?;
+		}
+		write!(f, "}}")
+	}
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct ClauseIndex {
 	val: u32,
 }
 impl ClauseIndex {
 	pub const MaxValue: i64 = (u32::max_value() as i64) + 1i64;
-	fn index(&self) -> usize {
+	pub fn index(&self) -> usize {
 		self.val as usize
 	}
 }
-impl Clone for ClauseIndex {
-	fn clone(&self) -> ClauseIndex {
-		ClauseIndex { val: self.val }
-	}
-}
-impl Copy for ClauseIndex {}
 impl TryFrom<VbeLexeme> for ClauseIndex {
 	type Error = VbeLexeme;
 	fn try_from(vbe: VbeLexeme) -> Result<ClauseIndex, VbeLexeme> {
@@ -74,9 +133,14 @@ impl Debug for ClauseIndex {
 		write!(f, "#{}", self.index())
 	}
 }
+impl Display for ClauseIndex {
+	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
+		write!(f, "#{}", self.index())
+	}
+}
 
 pub struct ClauseDbMeta {
-	pub tautology: bool,
+	// pub tautology: bool,
 }
 
 pub struct ClauseDbEntry {
@@ -84,13 +148,13 @@ pub struct ClauseDbEntry {
 	meta: ClauseDbMeta
 }
 impl ClauseDbEntry {
-	fn follow<'a, 'b: 'a>(&self, db: &'b ClauseDb) -> ClauseReference<'a> {
+	pub fn follow<'a, 'b: 'a>(&self, db: &'b ClauseDb) -> ClauseReference<'a> {
 		unsafe { ClauseReference::<'a> { rf: db.db.retrieve(self.addr) } }
 	}
-	fn meta(&self) -> &ClauseDbMeta {
+	pub fn meta(&self) -> &ClauseDbMeta {
 		&self.meta
 	}
-	fn mut_meta(&mut self) -> &mut ClauseDbMeta {
+	pub fn mut_meta(&mut self) -> &mut ClauseDbMeta {
 		&mut self.meta
 	}
 }
@@ -146,6 +210,31 @@ impl ClauseDb {
 			None => None,
 		}
 	}
+	pub fn iter<'a, 'b: 'a>(&'b self) -> ClauseDbIterator<'a> {
+		ClauseDbIterator::<'a> { it: self.index.iter().enumerate() }
+	}
+	pub fn extract(&self, id: ClauseIndex) -> Option<ClauseContainer> {
+		Some(self.retrieve(id)?.extract())
+	}
+	pub fn extract_chain(&self, chain: &[ClauseIndex], cutoff: usize) -> Option<ChainContainer> {
+		let mut it = chain.iter().enumerate();
+		let mut out = Vec::<(ClauseIndex, ClauseContainer)>::new();
+		while let Some((n, id)) = it.next() {
+			if n < cutoff {
+				out.push((*id, self.extract(*id)?));
+			} else {
+				break;
+			}
+		}
+		Some(ChainContainer(out))
+	}
+}
+impl<'a> IntoIterator for &'a ClauseDb {
+    type Item = ClauseIndex;
+    type IntoIter = ClauseDbIterator<'a>;
+    fn into_iter(self) -> ClauseDbIterator<'a> {
+        self.iter()
+    }
 }
 impl Debug for ClauseDb {
 	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
@@ -162,6 +251,22 @@ impl Debug for ClauseDb {
 	}
 }
 
+pub struct ClauseDbIterator<'a> {
+	it: Enumerate<Iter<'a, Option<ClauseDbEntry>>>
+}
+impl<'a> Iterator for ClauseDbIterator<'a> {
+	type Item = ClauseIndex;
+	fn next(&mut self) -> Option<ClauseIndex> {
+		loop { match self.it.next() {
+			Some((n, rf)) => if rf.is_some() {
+				break Some(ClauseIndex { val: n as u32 });
+			},
+			None => break None,
+		} }
+	}
+}
+
+
 pub struct ClauseDbWriter<'a> {
 	dbw: Option<ChunkDbWriter<'a>>,
 	entry: &'a mut Option<ClauseDbEntry>,
@@ -170,13 +275,6 @@ pub struct ClauseDbWriter<'a> {
 impl<'a> ClauseDbWriter<'a> {
 	pub fn write(&mut self, lit: Literal) -> InsertionTest {
 		let test = self.block.set(lit);
-		if test == InsertionTest::Alright {
-			unsafe { self.dbw.as_mut().unwrap().write(mem::transmute::<Literal, u32>(lit)); }
-		}
-		test
-	}
-	pub fn write_taut(&mut self, lit: Literal) -> InsertionTest {
-		let test = self.block.set_conflict(lit);
 		if test == InsertionTest::Alright {
 			unsafe { self.dbw.as_mut().unwrap().write(mem::transmute::<Literal, u32>(lit)); }
 		}
@@ -195,17 +293,16 @@ impl<'a> ClauseDbWriter<'a> {
 			it: self.dbw.as_ref().unwrap().iter()
 		}
 	}
-	pub fn extract(&self) -> Vec<Literal> {
+	pub fn extract(&self) -> ClauseContainer {
 		let it = self.iter();
-		it.copied().collect()
-	}
-	#[inline]
-	pub fn drain(self) -> Vec<Literal> {
-		self.extract()
+		ClauseContainer(it.copied().collect())
 	}
 	fn revert(&mut self) {
 		let it = ClauseIterator::<'_> { it: self.dbw.as_ref().unwrap().iter() };
 		self.block.clear_iter(it);
+	}
+	pub fn length(&self) -> usize {
+		self.dbw.as_ref().unwrap().length()
 	}
 }
 impl<'a> Drop for ClauseDbWriter<'a> {
@@ -295,15 +392,6 @@ impl<'a> ClauseSetWriter<'a> {
 		}
 		test
 	}
-	pub fn write_taut(&mut self, lit: Literal) -> InsertionTest {
-		let test = self.block.set_conflict(lit);
-		if test == InsertionTest::Alright {
-			unsafe { self.dbw.as_mut().unwrap().write(mem::transmute::<Literal, u32>(lit)); }
-			lit.hash(&mut self.main);
-			lit.hash(&mut self.sub);
-		}
-		test
-	}
 	pub fn close(mut self) {
 		self.revert();
 		let mut md = ManuallyDrop::<ClauseSetWriter<'a>>::new(self);
@@ -320,13 +408,8 @@ impl<'a> ClauseSetWriter<'a> {
 			it: self.dbw.as_ref().unwrap().iter()
 		}
 	}
-	pub fn extract(&self) -> Vec<Literal> {
-		let it = self.iter();
-		it.copied().collect()
-	}
-	#[inline]
-	pub fn drain(self) -> Vec<Literal> {
-		self.extract()
+	pub fn extract(mut self) -> ClauseContainer {
+		ClauseContainer(self.iter().copied().collect())
 	}
 	fn revert(&mut self) {
 		let it = ClauseIterator::<'_> { it: self.dbw.as_ref().unwrap().iter() };
@@ -351,7 +434,7 @@ impl<'a, 'b: 'a> ClauseSetComparer<'a, 'b> {
 		let it = comp.iter();
 		let size = it.size();
 		for &lit in it {
-			block.set_conflict(lit);
+			block.set(lit);
 			lit.hash(&mut hasher1);
 			lit.hash(&mut hasher2);
 		}
@@ -393,6 +476,9 @@ impl<'a> ClauseReference<'a> {
 	pub fn iter<'b: 'c, 'c>(&'b self) -> ClauseIterator<'c> where 'a: 'b {
 		ClauseIterator::<'c> { it: self.rf.iter() }
 	}
+	pub fn extract(&self) -> ClauseContainer {
+		ClauseContainer(self.iter().copied().collect())
+	}
 }
 impl<'a> Hashable32 for ClauseReference<'a> {
 	fn hash<H: Hasher32>(&self, hs: &mut H) {
@@ -400,6 +486,13 @@ impl<'a> Hashable32 for ClauseReference<'a> {
 			lit.hash(hs)
 		}
 	}
+}
+impl<'a: 'b, 'b> IntoIterator for &'b ClauseReference<'a> {
+    type Item = &'b Literal;
+    type IntoIter = ClauseIterator<'b>;
+    fn into_iter(self) -> ClauseIterator<'b> {
+        self.iter()
+    }
 }
 impl<'a> Debug for ClauseReference<'a> {
 	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
@@ -442,21 +535,14 @@ mod test {
 		variable::{Literal, Variable},
 	};
 
-	fn generate_clause<R: Rng + ?Sized>(rng: &mut R, block: &mut Block, force: bool) -> Vec<Literal> {
+	fn generate_clause<R: Rng + ?Sized>(rng: &mut R, block: &mut Block) -> Vec<Literal> {
 		let size = rng.gen_range(0usize, 100usize);
 		let mut vec = Vec::<Literal>::new();
 		for _ in 0..size {
 			let lit = Literal::random(rng, Some(Variable::MinVariable), Variable::new(10000000u32));
-			if force {
-				let test = block.set_conflict(lit);
-				if test == InsertionTest::Alright {
-					vec.push(lit);
-				}
-			} else {
-				let test = block.set(lit);
-				if test == InsertionTest::Alright {
-					vec.push(lit);
-				}
+			let test = block.set(lit);
+			if test == InsertionTest::Alright {
+				vec.push(lit);
 			}
 		}
 		block.clear_iter(vec.iter());
@@ -466,8 +552,8 @@ mod test {
 		vec
 	}
 
-	fn check_clause(candidate: &Vec<Literal>, list: &Vec<(Vec<Literal>, bool)>) -> bool {
-		for (vec, _) in list {
+	fn check_clause(candidate: &Vec<Literal>, list: &Vec<Vec<Literal>>) -> bool {
+		for vec in list {
 			let mut it1 = candidate.iter();
 			let mut it2 = vec.iter();
 			loop {
@@ -495,33 +581,28 @@ mod test {
 	fn test_clause_set() {
 		let mut set = ClauseSet::new();
 		let mut rng = rand::thread_rng();
-		let mut inner = Vec::<(Vec<Literal>, bool)>::new();
+		let mut inner = Vec::<Vec<Literal>>::new();
 		let mut outer = Vec::<Vec<Literal>>::new();
 		let mut block = Block::new();
 		let mut db = ChunkDb::new(3usize);
 		for _ in 0..1000 {
-			let forced: bool = rng.gen();
-			let cls = generate_clause(&mut rng, &mut block, forced);
-			inner.push((cls, forced));
+			let cls = generate_clause(&mut rng, &mut block);
+			inner.push(cls);
 		}
 		for _ in 0..500 {
-			let cls = generate_clause(&mut rng, &mut block, true);
+			let cls = generate_clause(&mut rng, &mut block);
 			if check_clause(&cls, &inner) {
 				outer.push(cls);
 			}
 		}
 		check_table_size(&set, 0usize);
-		for (cls, forced) in &mut inner {
+		for cls in &mut inner {
 			let lit_slice: &mut [Literal] = cls;
 			let u32_slice: &mut [u32] = unsafe { mem::transmute::<&mut [Literal], &mut [u32]>(lit_slice) };
 			u32_slice.shuffle(&mut rng);
 			let mut dbw = set.open(&mut block);
 			for lit in cls {
-				if *forced {
-					dbw.write_taut(*lit);
-				} else {
-					dbw.write(*lit);
-				}
+				dbw.write(*lit);
 			}
 			dbw.close();
 		}
@@ -539,7 +620,7 @@ mod test {
 			assert!(set.delete(&rf, &mut block).is_none());
 		}
 		check_table_size(&set, 1000usize);
-		for (cls, _) in &mut inner {
+		for cls in &mut inner {
 			let lit_slice: &mut [Literal] = cls;
 			let u32_slice: &mut [u32] = unsafe { mem::transmute::<&mut [Literal], &mut [u32]>(lit_slice) };
 			u32_slice.shuffle(&mut rng);
@@ -552,7 +633,7 @@ mod test {
 			assert!(set.delete(&rf, &mut block).is_some());
 		}
 		check_table_size(&set, 0usize);
-		for (cls, _) in &mut inner {
+		for cls in &mut inner {
 			let lit_slice: &mut [Literal] = cls;
 			let u32_slice: &mut [u32] = unsafe { mem::transmute::<&mut [Literal], &mut [u32]>(lit_slice) };
 			u32_slice.shuffle(&mut rng);
@@ -570,7 +651,6 @@ mod test {
 	#[derive(Debug)]
 	enum TestOp {
 		In(u32, Vec<Literal>),
-		Forced(u32, Vec<Literal>),
 		Out(u32),
 	}
 
@@ -598,24 +678,15 @@ mod test {
 				let index = empty.choose(&mut rng).unwrap();
 				let mut vec = Vec::<Literal>::new();
 				let size: usize = rng.gen_range(0usize, 3usize);
-				let force: bool = rng.gen();
 				for _ in 0..size {
 					let lit = Literal::random(&mut rng, Some(Variable::MinVariable), Variable::new(10000000u32));
-					let test = if force {
-						block.set_conflict(lit)
-					} else {
-						block.set(lit)
-					};
+					let test = block.set(lit);
 					if test == InsertionTest::Alright {
 						vec.push(lit);
 					}
 				}
 				block.clear_iter(vec.iter());
-				if force {
-					ops.push(TestOp::Forced(*index, vec));
-				} else {
-					ops.push(TestOp::In(*index, vec));
-				}
+				ops.push(TestOp::In(*index, vec));
 				full.push(*index);
 				let (n, _) = empty.iter().enumerate().find(|(_, x)| x == &index).unwrap();
 				empty.swap_remove(n);
@@ -637,18 +708,7 @@ mod test {
 						let test = dbw.write(*lit);
 						assert!(test == InsertionTest::Alright);
 					}
-					let meta = ClauseDbMeta { tautology: false };
-					dbw.close(meta);
-				},
-				TestOp::Forced(index, vec) => {
-					let index = ClauseIndex { val: *index };
-					assert!(cdb.retrieve(index).is_none());
-					let mut dbw = cdb.open(&mut block, index).unwrap();
-					for lit in vec {
-						let test = dbw.write_taut(*lit);
-						assert!(test == InsertionTest::Alright);
-					}
-					let meta = ClauseDbMeta { tautology: false };
+					let meta = ClauseDbMeta {};
 					dbw.close(meta);
 				},
 				TestOp::Out(index) => {
@@ -666,7 +726,7 @@ mod test {
 			let mut cls: Option<&Vec<Literal>> = None;
 			for op in &ops {
 				match op {
-					TestOp::In(index, vec) | TestOp::Forced(index, vec) => if index == &m {
+					TestOp::In(index, vec) => if index == &m {
 						cls = Some(&vec);
 					},
 					TestOp::Out(index) => if index == &m {

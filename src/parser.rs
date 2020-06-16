@@ -12,7 +12,7 @@ use either::{
 use crate::{
 	input::{FilePosition, Positionable, InputStream},
 	lexer::{LexingError, DimacsLexer, VbeLexer, DimacsLexeme, VbeLexeme, DimacsDiscriminant},
-	variable::{Variable, Literal},
+	variable::{Variable, Literal, MaybeVariable},
 	clausedb::{ClauseIndex},
 };
 
@@ -97,14 +97,13 @@ impl Error for ParsingError {
 type ParsingResult<T> = Result<T, ParsingError>;
 
 pub struct CnfHeaderStats {
-	pub variables: Option<Variable>,
+	pub variables: MaybeVariable,
 	pub clauses: usize
 }
 
 pub enum AsrInstructionKind {
 	Rup(ClauseIndex),
 	Sr(ClauseIndex),
-	Xr(ClauseIndex),
 	Del,
 }
 
@@ -174,9 +173,8 @@ impl CnfParser for DimacsCnfParser {
 	}
 	fn parse_cnf_header(&mut self) -> ParsingResult<CnfHeaderStats> {
 		let var = match self.next()? {
-			Some(DimacsLexeme::Number(num)) => match Variable::try_from(num) {
-				Ok(var) => Some(var),
-				Err(0i64) => None,
+			Some(DimacsLexeme::Number(num)) => match MaybeVariable::try_from(num) {
+				Ok(var) => var,
 				Err(x) => self.error_oor_num_variables(x)?,
 			},
 			_ => self.error_expected_num_variables()?,
@@ -303,7 +301,6 @@ impl AsrParser for DimacsAsrParser {
 			Some(DimacsDiscriminant::Letter) => match self.next()? {
 				Some(DimacsLexeme::Letter(b'r')) => Ok(Some(AsrInstructionKind::Rup(self.parse_proper_id()?))),
 				Some(DimacsLexeme::Letter(b's')) => Ok(Some(AsrInstructionKind::Sr(self.parse_proper_id()?))),
-				Some(DimacsLexeme::Letter(b'x')) => Ok(Some(AsrInstructionKind::Xr(self.parse_proper_id()?))),
 				Some(DimacsLexeme::Letter(b'd')) => Ok(Some(AsrInstructionKind::Del)),
 				_ => self.error_expected_instruction(),
 			},

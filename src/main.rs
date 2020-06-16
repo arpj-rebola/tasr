@@ -8,6 +8,8 @@ pub mod variable;
 pub mod assignment;
 pub mod chunkdb;
 pub mod clausedb;
+pub mod unitpropagation;
+pub mod chaindb;
 pub mod results;
 pub mod checker;
 

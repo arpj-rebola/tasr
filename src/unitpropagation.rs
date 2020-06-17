@@ -4,7 +4,7 @@ use std::{
 use crate::{
     assignment::{InsertionTest, BacktrackBlock, SubstitutionStack},
     chaindb::{ChainDb},
-    clausedb::{ClauseDb, ClauseDbEntry, ClauseIndex, ClauseReference},
+    clausedb::{ClauseDb, ClauseIndex, ClauseReference},
     variable::{Literal},
 };
 

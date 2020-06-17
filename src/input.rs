@@ -1,23 +1,34 @@
 use std::{
+	convert::{TryFrom},
 	error::{Error},
 	fs::{File},
 	fmt::{self, Display, Binary, Formatter, Debug},
 	io::{self, Read},
 	mem::{self},
-	path::{Path},
+	path::{PathBuf, Path},
+};
+
+use zstd;
+use flate2;
+use bzip2;
+use xz2;
+use lz4;
+
+use crate::{
+	lexer::{LexingError, LexingResult},
 };
 
 #[derive(Debug, Clone)]
 pub struct FilePosition {
-	name: String,
+	name: PathBuf,
 	col: usize,
 	ln: usize,
 	pos: usize,
 }
 impl FilePosition {
-	pub fn new(name: &str) -> FilePosition {
+	pub fn new(name: &Path) -> FilePosition {
 		FilePosition {
-			name: name.to_string(),
+			name: name.to_path_buf(),
 			col: 1usize,
 			ln: 1usize,
 			pos: 0usize,
@@ -88,21 +99,61 @@ impl Error for InputError {
 
 pub type InputResult<T> = Result<T, InputError>;
 
+#[derive(Debug)]
+pub enum CompressionFormat {
+	Plain,
+	Zst,
+	Gz,
+	Bz2,
+	Xz,
+	Lz4,
+}
+impl<'a> TryFrom<Option<&'a str>> for CompressionFormat {
+	type Error = &'a str;
+	fn try_from(val: Option<&'a str>) -> Result<CompressionFormat, &'a str> {
+		Ok(match val {
+			Some("zst") => CompressionFormat::Zst,
+			Some("gz") => CompressionFormat::Gz,
+			Some("bz2") => CompressionFormat::Bz2,
+			Some("xz") => CompressionFormat::Xz,
+			Some("lz4") => CompressionFormat::Lz4,
+			Some("plain") => CompressionFormat::Plain,
+			None => CompressionFormat::Plain,
+			Some(rf) => Err(rf)?
+		})
+	}
+}
+
 pub struct InputStream {
 	it: Box<dyn Iterator<Item = Result<u8, io::Error>>>,
 	pos: FilePosition,
 	pk: InputResult<Option<u8>>,
 }
 impl InputStream {
-	pub fn open_plain(path: &Path) -> Result<InputStream, io::Error> {
-		let fs = File::open(&path)?;
-		let name = format!("{}", path.display());
-		Ok(InputStream::new(fs.bytes(), &name))
+	pub fn open(path: &Path, format: CompressionFormat) -> InputResult<InputStream> {
+		let file = match File::open(&path) {
+			Ok(file) => file,
+			Err(err) => Err(InputError::io_error(&FilePosition::new(path), err))?,
+		};
+		Ok(match format {
+			CompressionFormat::Plain => InputStream::new(file.bytes(), path),
+			CompressionFormat::Zst => match zstd::stream::read::Decoder::new(file) {
+				Ok(de) => InputStream::new(de.bytes(), path),
+				Err(err) => Err(InputError::io_error(&FilePosition::new(path), err))?,
+			},
+			CompressionFormat::Gz => InputStream::new(flate2::read::GzDecoder::new(file).bytes(), path),
+			CompressionFormat::Bz2 => InputStream::new(bzip2::read::BzDecoder::new(file).bytes(), path),
+			CompressionFormat::Xz => InputStream::new(xz2::read::XzDecoder::new(file).bytes(), path),
+			CompressionFormat::Lz4 => match lz4::Decoder::new(file) {
+				Ok(de) => InputStream::new(de.bytes(), path),
+				Err(err) => Err(InputError::io_error(&FilePosition::new(path), err))?,
+			},
+		})
 	}
-	pub fn new<I>(mut it: I, name: &str) -> InputStream where
+	pub fn new<I>(mut it: I, path: &Path) -> InputStream where
 		I: 'static + Iterator<Item = Result<u8, io::Error>> + Sized,
 	{
-		let pos = FilePosition::new(name);
+		let pos = FilePosition::new(path);
 		let pk = match it.next() {
 			Some(Ok(c)) => Ok(Some(c)),
 			Some(Err(e)) => Err(InputError::io_error(&pos, e)),
@@ -110,7 +161,7 @@ impl InputStream {
 		};
 		InputStream {
 			it: Box::<I>::new(it),
-			pos: FilePosition::new(name),
+			pos: pos,
 			pk: pk,
 		}
 	}
@@ -172,13 +223,13 @@ mod test {
 		path::{Path},
 	};
 	use crate::{
-		input::{InputStream},
+		input::{InputStream, CompressionFormat},
 	};
 
 	#[test]
 	fn test_input_stream() {
 		let path = Path::new("test/file_reader/filereader.txt");
-		let mut is = InputStream::open_plain(&path).expect("Couldn't find file");
+		let mut is = InputStream::open(&path, CompressionFormat::Plain).expect("Couldn't find file");
 		let mut vec = Vec::<u8>::new();
 		while let Ok(Some(x)) = is.peek() {
 			let y1 = *x;

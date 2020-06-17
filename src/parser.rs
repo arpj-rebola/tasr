@@ -2,11 +2,6 @@ use std::{
 	convert::{TryFrom},
 	error::{Error},
 	fmt::{self, Debug, Display, Binary, Formatter},
-	io::{self},
-};
-
-use either::{
-	Either::{self, Left, Right},
 };
 
 use crate::{
@@ -134,9 +129,6 @@ impl DimacsCnfParser {
 	fn next(&mut self) -> ParsingResult<Option<DimacsLexeme>> {
 		self.lexer.next_err::<ParsingError>()
 	}
-	fn error_expected_cnf_header<T>(&self) -> ParsingResult<T> {
-		Err(ParsingError::expected_field(self, "header 'p cnf'"))
-	}
 	fn error_expected_num_variables<T>(&self) -> ParsingResult<T> {
 		Err(ParsingError::expected_field(self, "number of variables"))
 	}
@@ -234,15 +226,6 @@ impl DimacsAsrParser {
 			},
 			_ => self.error_expected_proper_id(),
 		}
-	}
-	fn error_expected_asr_header<T>(&self) -> ParsingResult<T> {
-		Err(ParsingError::expected_field(self, "header 'p asr'"))
-	}
-	fn error_expected_core_header<T>(&self) -> ParsingResult<T> {
-		Err(ParsingError::expected_field(self, "header 'p core'"))
-	}
-	fn error_expected_proof_header<T>(&self) -> ParsingResult<T> {
-		Err(ParsingError::expected_field(self, "header 'p proof'"))
 	}
 	fn error_expected_core<T>(&self) -> ParsingResult<T> {
 		Err(ParsingError::expected_field(self, "core marker, proof header, or EOF"))

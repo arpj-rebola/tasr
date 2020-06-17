@@ -2,12 +2,10 @@ use std::{
 	fmt::{self, Display, Formatter, Binary},
 };
 use crate::{
-	assignment::{SubstitutionStack},
-	chaindb::{ChainDb},
-	clausedb::{ClauseDb, ClauseIndex, ClauseReference, ClauseContainer, ChainContainer, WitnessContainer, RawChainContainer},
-	input::{FilePosition, Positionable},
-	parser::{ParsingError, CnfParser, AsrParser},
-	variable::{Variable, Literal, MaybeVariable},
+	clausedb::{ClauseIndex, ClauseContainer, ChainContainer, WitnessContainer, RawChainContainer},
+	input::{FilePosition},
+	parser::{ParsingError},
+	variable::{Literal, MaybeVariable},
 };
 
 pub struct IncorrectCnfStats<T: Display> {
@@ -413,7 +411,7 @@ impl Display for VerificationFailure {
 			VerificationFailure::RepeatedLateralSr(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference. Two subchains {} and {} are given for the same clause identifier {}: {}.", &bx.pos, &bx.num, &bx.clause, &bx.chains.0, &bx.chains.1, &bx.lateral.0, &bx.lateral.1),
 			VerificationFailure::MissingSuffixSr(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mappin {}. The formula clause {}: {} needs a propagation chain, but none is given.", &bx.pos, &bx.num, &bx.clause, &bx.witness, &bx.lateral.0, &bx.lateral.1),
 			VerificationFailure::UnsatisfiedSr(bx) => write!(f, "Incorrect SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}, but the mapping does not satisfy this clause.", &bx.pos, &bx.num, &bx.clause, &bx.witness),
-			VerificationFailure::MissingDeletion(bx) => write!(f, "Invalid deletion instruction in ASR file {}:\nProof instruction {} deletes the clause with identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.pos, &bx.id),
+			VerificationFailure::MissingDeletion(bx) => write!(f, "Invalid deletion instruction in ASR file {}:\nProof instruction {} deletes the clause with identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.id),
 			VerificationFailure::Unrefuted(bx) => write!(f, "Invalid proof in ASR file {}:\nThe proof does not derive the empty clause at any point.", &**bx),
 		}
 	}
@@ -451,7 +449,7 @@ impl Binary for VerificationFailure {
 			VerificationFailure::RepeatedLateralSr(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference. Two subchains {} and {} are given for the same clause identifier {}: {}.", &bx.pos, &bx.num, &bx.clause, &bx.chains.0, &bx.chains.1, &bx.lateral.0, &bx.lateral.1),
 			VerificationFailure::MissingSuffixSr(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mappin {}. The formula clause {}: {} needs a propagation chain, but none is given.", &bx.pos, &bx.num, &bx.clause, &bx.witness, &bx.lateral.0, &bx.lateral.1),
 			VerificationFailure::UnsatisfiedSr(bx) => write!(f, "Incorrect SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}, but the mapping does not satisfy this clause.", &bx.pos, &bx.num, &bx.clause, &bx.witness),
-			VerificationFailure::MissingDeletion(bx) => write!(f, "Invalid deletion instruction in ASR file {:b}:\nProof instruction {} deletes the clause with identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.pos, &bx.id),
+			VerificationFailure::MissingDeletion(bx) => write!(f, "Invalid deletion instruction in ASR file {:b}:\nProof instruction {} deletes the clause with identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.id),
 			VerificationFailure::Unrefuted(bx) => write!(f, "Invalid proof in ASR file {:b}:\nThe proof does not derive the empty clause at any point.", &**bx),
 		}
 	}

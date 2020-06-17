@@ -84,7 +84,7 @@ impl<'a> ChainDbWriter<'a> {
     pub fn write(&mut self, id: ClauseIndex) {
         self.db.vec.push(id.index() as u32);
     }
-    pub fn close(mut self) {
+    pub fn close(self) {
         let len = (self.db.vec.len() - self.origin - 1usize) as u32;
         unsafe { *self.db.vec.get_unchecked_mut(self.origin) = len; }
         unsafe { *self.db.index.get_unchecked_mut(self.index) = self.origin };

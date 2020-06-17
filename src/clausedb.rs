@@ -408,7 +408,7 @@ impl<'a> ClauseSetWriter<'a> {
 			it: self.dbw.as_ref().unwrap().iter()
 		}
 	}
-	pub fn extract(mut self) -> ClauseContainer {
+	pub fn extract(self) -> ClauseContainer {
 		ClauseContainer(self.iter().copied().collect())
 	}
 	fn revert(&mut self) {
@@ -468,11 +468,6 @@ pub struct ClauseReference<'a> {
 	rf: ChunkDbReference<'a>,
 }
 impl<'a> ClauseReference<'a> {
-	fn age<'b>(self) -> ClauseReference<'b> where 'a: 'b {
-		ClauseReference::<'b> {
-			rf: self.rf.age()
-		}
-	}
 	pub fn iter<'b: 'c, 'c>(&'b self) -> ClauseIterator<'c> where 'a: 'b {
 		ClauseIterator::<'c> { it: self.rf.iter() }
 	}
@@ -522,7 +517,6 @@ impl<'a> Iterator for ClauseIterator<'a> {
 #[cfg(test)]
 mod test {
 	use std::{
-		convert::{TryFrom},
 		mem::{self},
 	};
 	use rand::{self, Rng,

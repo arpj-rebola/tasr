@@ -1,10 +1,11 @@
 use std::{
 	error::{Error},
 	fmt::{self, Formatter, Display, Binary, Debug},
+	path::{Path, PathBuf},
 };
 
 use crate::{
-	input::{FilePosition, InputStream, Positionable, InputError},
+	input::{FilePosition, InputStream, Positionable, InputError, CompressionFormat},
 };
 
 pub struct HeaderTooLong {
@@ -129,7 +130,7 @@ impl Error for LexingError {
     }
 }
 
-type LexingResult<T> = Result<T, LexingError>;
+pub type LexingResult<T> = Result<T, LexingError>;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DimacsLexeme {
@@ -400,9 +401,6 @@ impl VbeLexer {
 	{
 		self.next().map_err(E::from)
 	}
-	fn error_leading_zeroes<T>(&mut self) -> LexingResult<T> {
-		Err(LexingError::syntax_error(self, format!("Variable-bit encoded number contains leading zeroes.")))
-	}
 	fn error_unterminated_integer<T>(&mut self) -> LexingResult<T> {
 		Err(LexingError::syntax_error(self, format!("Unterminated variable-bit encoded number.")))
 	}
@@ -434,14 +432,14 @@ mod test {
 		path::{Path},
 	};
 	use crate::{
-		input::{InputStream},
+		input::{InputStream, CompressionFormat},
 		lexer::{DimacsLexer, LexingError, VbeLexer, VbeLexeme,
 			DimacsLexeme::{self, Header, Number, Letter},
 		},
 	};
 
 	fn check_dimacs_lexer(path: &Path, check: &Vec<DimacsLexeme>, f: Option<Box<dyn Fn(&LexingError) -> bool>>) {
-		let is = InputStream::open_plain(path).expect("Could not open file");
+		let is = InputStream::open(path, CompressionFormat::Plain).expect("Could not open file");
 		let mut lexer = DimacsLexer::new(is);
 		let mut vec = Vec::<DimacsLexeme>::new();
 		loop {
@@ -469,7 +467,7 @@ mod test {
 	}
 
 	fn check_vbe_lexer(path: &Path, check: &Vec<u64>, f: Option<Box<dyn Fn(&LexingError) -> bool>>) {
-		let is = InputStream::open_plain(path).expect("Could not open file");
+		let is = InputStream::open(path, CompressionFormat::Plain).expect("Could not open file");
 		let mut lexer = VbeLexer::new(is);
 		let mut vec = Vec::<VbeLexeme>::new();
 		loop {

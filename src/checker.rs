@@ -1,19 +1,13 @@
 use std::{
-	mem::{self},
-	ops::{BitOr, BitOrAssign},
-	path::{Path},
-};
-
-use either::{
-	Either::{self, Left, Right},
+	path::{PathBuf},
 };
 
 use crate::{
 	assignment::{Block, InsertionTest, BacktrackBlock, SubstitutionStack},
 	chaindb::{ChainDb},
-	clausedb::{ClauseDb, ClauseIndex, ClauseSet, ClauseSetWriter, ClauseDbWriter, ClauseDbMeta, ClauseReference, ClauseContainer, RawChainContainer},
-	input::{FilePosition, Positionable},
-	parser::{ParsingError, CnfParser, AsrParser, AsrInstructionKind, CnfHeaderStats},
+	clausedb::{ClauseDb, ClauseIndex, ClauseSet, ClauseDbMeta, ClauseContainer, RawChainContainer},
+	input::{FilePosition, Positionable, CompressionFormat},
+	parser::{CnfParser, AsrParser, AsrInstructionKind, CnfHeaderStats},
 	results::{VerificationResult, VerificationFailure},
 	unitpropagation::{UnitPropagator, PropagationResult},
 	variable::{Variable, Literal, MaybeVariable},
@@ -108,16 +102,22 @@ impl CheckerStats {
 	}
 }
 
+#[derive(Debug)]
 pub struct CheckerConfig {
-	pub cnf_file: Option<Box<Path>>,
-	pub asr_file: Option<Box<Path>>,
+	pub cnf_file: PathBuf,
+	pub asr_file: PathBuf,
+	pub cnf_compression: CompressionFormat,
+	pub asr_compression: CompressionFormat,
+	pub cnf_binary: bool,
 	pub asr_binary: bool,
 	pub check_core: bool,
-	pub check_proof: bool,
+	pub check_derivation: bool,
+	pub check_refutation: bool,
 	pub permissive: bool,
+	pub print_stats: bool,
 }
 
-pub struct AsrChecker<'a> {
+pub struct CheckerData<'a> {
 	cnf: &'a mut dyn CnfParser,
 	asr: &'a mut dyn AsrParser,
 	db: ClauseDb,
@@ -125,13 +125,7 @@ pub struct AsrChecker<'a> {
 	config: CheckerConfig,
 }
 
-enum InputPart {
-	Cnf,
-	Core,
-	Proof,
-}
-
-pub struct CoreChecker<'a> {
+pub struct AsrChecker<'a> {
 	cnf: DynCnfParser<'a>,
 	asr: DynAsrParser<'a>,
 	db: &'a mut ClauseDb,
@@ -139,9 +133,9 @@ pub struct CoreChecker<'a> {
 	config: &'a CheckerConfig,
 	set: ClauseSet,
 }
-impl<'a> CoreChecker<'a> {
-	pub fn new<'b: 'a, 'c: 'b>(checker: &'b mut AsrChecker<'c>) -> CoreChecker<'a> {
-		CoreChecker::<'a> {
+impl<'a> AsrChecker<'a> {
+	pub fn new<'b: 'a, 'c: 'b>(checker: &'b mut CheckerData<'c>) -> AsrChecker<'a> {
+		AsrChecker::<'a> {
 			cnf: DynCnfParser::<'a>::new(&mut *checker.cnf),
 			asr: DynAsrParser::<'a>::new(&mut *checker.asr),
 			db: &mut checker.db,
@@ -154,7 +148,7 @@ impl<'a> CoreChecker<'a> {
 		if self.config.check_core {
 			self.check_cnf()?;
 		}
-		if self.config.check_core || self.config.check_proof {
+		if self.config.check_core || self.config.check_derivation || self.config.check_refutation {
 			self.check_asr()?;
 		}
 		Ok(())
@@ -264,47 +258,53 @@ impl<'a> CoreChecker<'a> {
 		loop { match self.asr.parse_proof()? {
 			Some(AsrInstructionKind::Rup(id)) => {
 				self.stats.num_rups += 1usize;
-				let empty = unsafe { self.parse_db_clause(id, unsafe { block.mut_block() }, true) }?;
+				let empty = self.parse_db_clause(id, unsafe { block.mut_block() }, true)?;
 				self.parse_db_chain(&mut chain, id, None)?;
-				let result = {
-					let mut up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst);
-					let result = up.propagate_rup(id, self.config.permissive).unwrap();
+				if self.config.check_derivation {
+					let result = {
+						let mut up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst);
+						let result = up.propagate_rup(id, self.config.permissive).unwrap();
+						if result.error() || !result.conflict() {
+							up.freeze();
+						}
+						result
+					};
 					if result.error() || !result.conflict() {
-						up.freeze();
+						self.error_incorrect_rup(&chain, id, result)?
 					}
-					result
-				};
-				if result.error() || !result.conflict() {
-					self.error_incorrect_rup(&chain, id, result)?
 				}
 				refutation |= empty;
 			},
 			Some(AsrInstructionKind::Sr(id)) => {
 				self.stats.num_srs += 1usize;
-				let empty = unsafe { self.parse_db_clause(id, unsafe { block.mut_block() } , true) }?;
+				let empty = self.parse_db_clause(id, unsafe { block.mut_block() } , true)?;
 				self.parse_witness(&mut subst)?;
-				if !self.check_witness(&mut subst, block, id) {
-					self.error_unsatisfied_sr(&subst, id)?
+				if self.config.check_derivation {
+					if !self.check_witness(&mut subst, block, id) {
+						self.error_unsatisfied_sr(&subst, id)?
+					}
 				}
 				while let Some(lat) = self.asr.parse_chain()? {
 					self.parse_db_chain(&mut chain, id, Some(lat))?;
 				}
-				let (result, optcid) = {
-					let mut up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst);
-					let mut it = self.db.iter();
-					loop { match it.next() {
-						Some(cid) => {
-							let result = up.propagate_sr(id, cid, self.config.permissive).unwrap();
-							if result.error() || !result.conflict() {
-								up.freeze();
-								break (result, Some(cid));
-							}
-						},
-						None => break (PropagationResult::Stable, None)
-					} }
-				};
-				if result.error() || !result.conflict() {
-					self.error_incorrect_sr(&chain, &subst, id, optcid.unwrap(), result)?
+				if self.config.check_derivation {
+					let (result, optcid) = {
+						let mut up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst);
+						let mut it = self.db.iter();
+						loop { match it.next() {
+							Some(cid) => {
+								let result = up.propagate_sr(id, cid, self.config.permissive).unwrap();
+								if result.error() || !result.conflict() {
+									up.freeze();
+									break (result, Some(cid));
+								}
+							},
+							None => break (PropagationResult::Stable, None)
+						} }
+					};
+					if result.error() || !result.conflict() {
+						self.error_incorrect_sr(&chain, &subst, id, optcid.unwrap(), result)?
+					}
 				}
 				refutation |= empty;
 			},
@@ -321,8 +321,10 @@ impl<'a> CoreChecker<'a> {
 			}
 			None => break,
 		} }
-		if !refutation {
-			self.error_unrefuted()?
+		if self.config.check_refutation{
+			if !refutation {
+				self.error_unrefuted()?
+			}
 		}
 		Ok(())
 	}
@@ -431,10 +433,10 @@ impl<'a> CoreChecker<'a> {
 		Err(VerificationFailure::incorrect_num_clauses(pos, cls, stat))
 	}
 	fn error_invalid_clause<T>(&mut self, block: &Block, mut clause: ClauseContainer, lit: Literal, proof: Option<bool>) -> VerificationResult<T> {
-		fn cnf<'b>(cc: &mut CoreChecker<'b>) -> VerificationResult<Option<Literal>> {
+		fn cnf<'b>(cc: &mut AsrChecker<'b>) -> VerificationResult<Option<Literal>> {
 			cc.cnf.parse_clause()
 		}
-		fn asr<'b>(cc: &mut CoreChecker<'b>) -> VerificationResult<Option<Literal>> {
+		fn asr<'b>(cc: &mut AsrChecker<'b>) -> VerificationResult<Option<Literal>> {
 			cc.asr.parse_clause()
 		}
 		let pos = match proof {

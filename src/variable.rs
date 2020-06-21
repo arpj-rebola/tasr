@@ -9,7 +9,6 @@ use rand::{Rng,
 };
 use crate::{
 	hasher::{Hashable32, Hasher32},
-	lexer::{VbeLexeme},
 };
 
 #[derive(Copy, Clone, Eq)]
@@ -53,12 +52,13 @@ impl TryFrom<i64> for Variable {
 		}
 	}
 }
-impl TryFrom<VbeLexeme> for Variable {
-	type Error = VbeLexeme;
-	fn try_from(vbe: VbeLexeme) -> Result<Variable, VbeLexeme> {
-		match vbe {
-			VbeLexeme::Number(num) if num <= u32::max_value() as u64 && num > 1u64 => Ok(Variable::new(num as u32)),
-			_ => Err(vbe),
+impl TryFrom<u64> for Variable {
+	type Error = u64;
+	fn try_from(num: u64) -> Result<Variable, u64> {
+		if num <= u32::max_value() as u64 && num > 1u64 {
+			Ok(Variable::new(num as u32))
+		} else {
+			Err(num)
 		}
 	}
 }
@@ -121,9 +121,19 @@ impl TryFrom<i64> for MaybeVariable {
 	fn try_from(num: i64) -> Result<MaybeVariable, i64> {
 		if num > 0i64 && num <= Variable::MaxValue {
 			Ok(MaybeVariable { val: (num as u32) << 1 })
-		} else if num < 0i64 && num >= -Variable::MaxValue {
-			Ok(MaybeVariable { val: (-num as u32) << 1 })
 		} else if num == 0i64 {
+			Ok(MaybeVariable::None)
+		} else {
+			Err(num)
+		}
+	}
+}
+impl TryFrom<u64> for MaybeVariable {
+	type Error = u64;
+	fn try_from(num: u64) -> Result<MaybeVariable, u64> {
+		if num > 0u64 && num <= Variable::MaxValue as u64 {
+			Ok(MaybeVariable { val: (num as u32) << 1 })
+		} else if num == 0u64 {
 			Ok(MaybeVariable::None)
 		} else {
 			Err(num)
@@ -155,6 +165,11 @@ impl PartialOrd for MaybeVariable {
 impl Ord for MaybeVariable {
 	fn cmp(&self, oth: &MaybeVariable) -> Ordering {
 		(self.val | 1u32).cmp(&(oth.val | 1u32))
+	}
+}
+impl Debug for MaybeVariable {
+	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
+		write!(f, "{}", self.val >> 1usize)
 	}
 }
 impl Display for MaybeVariable {
@@ -251,12 +266,13 @@ impl TryFrom<i64> for Literal {
 		}
 	}
 }
-impl TryFrom<VbeLexeme> for Literal {
-	type Error = VbeLexeme;
-	fn try_from(vbe: VbeLexeme) -> Result<Literal, VbeLexeme> {
-		match vbe {
-			VbeLexeme::Number(num) if num <= u32::max_value() as u64 && num > 1u64 => Ok(Literal::new(num as u32)),
-			_ => Err(vbe),
+impl TryFrom<u64> for Literal {
+	type Error = u64;
+	fn try_from(num: u64) -> Result<Literal, u64> {
+		if num <= u32::max_value() as u64 && num > 1u64 {
+			Ok(Literal::new(num as u32))
+		} else {
+			Err(num)
 		}
 	}
 }

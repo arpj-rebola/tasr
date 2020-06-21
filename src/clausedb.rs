@@ -10,11 +10,11 @@ use std::{
 use crate::{
 	assignment::{Block, InsertionTest},
 	hasher::{Hasher32, Hashable32, AmxHasher, UnwindHasher},
-	lexer::{VbeLexeme},
 	variable::{Literal, Variable},
 	chunkdb::{DbAddress, ChunkDb, ChunkDbReference, ChunkDbWriter, ChunkDbIterator},
 };
 
+#[derive(Debug)]
 pub struct ClauseContainer(pub Vec<Literal>);
 impl Display for ClauseContainer {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -32,6 +32,7 @@ impl Display for ClauseContainer {
 	}
 }
 
+#[derive(Debug)]
 pub struct ChainContainer(pub Vec<(ClauseIndex, ClauseContainer)>);
 impl Display for ChainContainer {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -42,6 +43,7 @@ impl Display for ChainContainer {
 	}
 }
 
+#[derive(Debug)]
 pub struct RawChainContainer(pub Vec<ClauseIndex>);
 impl Display for RawChainContainer {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -59,6 +61,7 @@ impl Display for RawChainContainer {
 	}
 }
 
+#[derive(Debug)]
 pub struct WitnessContainer(pub Vec<(Variable, Literal)>);
 impl Display for WitnessContainer {
 	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -87,12 +90,13 @@ impl ClauseIndex {
 		self.val as usize
 	}
 }
-impl TryFrom<VbeLexeme> for ClauseIndex {
-	type Error = VbeLexeme;
-	fn try_from(vbe: VbeLexeme) -> Result<ClauseIndex, VbeLexeme> {
-		match vbe {
-			VbeLexeme::Number(num) if num > 0u64 && num <= ClauseIndex::MaxValue as u64 => Ok(ClauseIndex { val: (num - 1u64) as u32 }),
-			_ => Err(vbe),
+impl TryFrom<u64> for ClauseIndex {
+	type Error = u64;
+	fn try_from(num: u64) -> Result<ClauseIndex, u64> {
+		if num > 0u64 && num <= ClauseIndex::MaxValue as u64 {
+			Ok(ClauseIndex { val: (num - 1u64) as u32 })
+		} else {
+			Err(num)
 		}
 	}
 }

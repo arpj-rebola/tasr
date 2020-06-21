@@ -2,7 +2,6 @@
 
 pub mod hasher;
 pub mod input;
-pub mod lexer;
 pub mod parser;
 pub mod variable;
 pub mod assignment;
@@ -19,7 +18,7 @@ use std::{
 };
 
 use clap::{
-    Arg, App, SubCommand, ArgMatches,
+    Arg, App, ArgMatches,
 };
 
 use crate::{
@@ -73,21 +72,35 @@ fn main() {
         .arg(Arg::with_name("FORMULA")
             .index(1u64)
             .required(true)
-            .help("path to the CNF formula file"))
+            .help("path to the CNF formula file; \"-\" specifies an empty CNF formula"))
         .arg(Arg::with_name("PROOF")
             .index(2u64)
-            .required(true)
-            .help("path to the ASR core & proof file"))
+            .conflicts_with("ASR_COMPRESSION")
+            .help("path to the ASR core & proof file; standard input is read if omitted"))
         .get_matches();
     let config = config_from_matches(matches);
     println!("{:?}", config);
 }
 
 fn config_from_matches(args: ArgMatches) -> CheckerConfig {
-    let mut cnf_file = PathBuf::new();
-    cnf_file.push(args.value_of("FORMULA").unwrap());
-    let mut asr_file = PathBuf::new();
-    asr_file.push(args.value_of("PROOF").unwrap());
+    let cnf_file = {
+        let path = args.value_of("FORMULA").unwrap();
+        if path == "-" {
+            None
+        } else {
+            let mut pb = PathBuf::new();
+            pb.push(path);
+            Some(pb)
+        }
+    };
+    let asr_file = match args.value_of("PROOF") {
+        None => None,
+        Some(path) => {
+            let mut pb = PathBuf::new();
+            pb.push(path);
+            Some(pb)
+        }
+    };
     let cnf_binary = args.is_present("CNF_BINARY");
     let asr_binary = args.is_present("ASR_BINARY");
     let cnf_compression = CompressionFormat::try_from(args.value_of("CNF_COMPRESSION")).unwrap();
@@ -111,8 +124,8 @@ fn config_from_matches(args: ArgMatches) -> CheckerConfig {
     }
     let stats = args.is_present("STATS");
     CheckerConfig {
-        cnf_file: cnf_file,
-        asr_file: asr_file,
+        cnf_path: cnf_file,
+        asr_path: asr_file,
         cnf_compression: cnf_compression,
         asr_compression: asr_compression,
         cnf_binary: cnf_binary,

@@ -1,4 +1,6 @@
 use std::{
+	error::{Error},
+	io::{self},
 	fmt::{self, Display, Formatter, Binary},
 };
 use crate::{
@@ -8,17 +10,20 @@ use crate::{
 	variable::{Literal, MaybeVariable},
 };
 
+#[derive(Debug)]
 pub struct IncorrectCnfStats<T: Display> {
 	found: T,
 	expected: T,
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub struct WrongSection {
 	header: String,
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub struct InvalidClause {
 	num: usize,
 	clause: ClauseContainer,
@@ -26,12 +31,14 @@ pub struct InvalidClause {
 	issue: Literal,
 }
 
+#[derive(Debug)]
 pub struct InvalidWitness {
 	num: usize,
 	witness: WitnessContainer,
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub struct ConflictId {
 	num: usize,
 	id: ClauseIndex,
@@ -39,6 +46,7 @@ pub struct ConflictId {
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub struct StableChain {
 	num: usize,
 	clause: ClauseContainer,
@@ -47,6 +55,7 @@ pub struct StableChain {
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub struct IncorrectChain {
 	num: usize,
 	clause: ClauseContainer,
@@ -57,6 +66,7 @@ pub struct IncorrectChain {
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub struct MissingLateral {
 	num: usize,
 	clause: ClauseContainer,
@@ -65,6 +75,7 @@ pub struct MissingLateral {
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub struct RepeatedLateral {
 	num: usize,
 	clause: ClauseContainer,
@@ -73,6 +84,7 @@ pub struct RepeatedLateral {
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub struct MissingSuffix {
 	num: usize,
 	clause: ClauseContainer,
@@ -81,6 +93,7 @@ pub struct MissingSuffix {
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub struct UnsatisfyingWitness {
 	num: usize,
 	clause: ClauseContainer,
@@ -88,13 +101,16 @@ pub struct UnsatisfyingWitness {
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub struct MissingDeletion {
 	num: usize,
 	id: ClauseIndex,
 	pos: FilePosition,
 }
 
+#[derive(Debug)]
 pub enum VerificationFailure {
+	InputError(Box<io::Error>),
 	ParsingError(Box<ParsingError>),
 	IncorrectNumVariables(Box<IncorrectCnfStats<MaybeVariable>>),
 	IncorrectNumClauses(Box<IncorrectCnfStats<usize>>),
@@ -373,6 +389,11 @@ impl VerificationFailure {
 		VerificationFailure::Unrefuted(Box::<FilePosition>::new(pos))
 	}
 }
+impl From<io::Error> for VerificationFailure {
+	fn from(err: io::Error) -> VerificationFailure {
+		VerificationFailure::InputError(Box::<io::Error>::new(err))
+	}
+}
 impl From<ParsingError> for VerificationFailure {
 	fn from(err: ParsingError) -> VerificationFailure {
 		VerificationFailure::ParsingError(Box::<ParsingError>::new(err))
@@ -381,6 +402,7 @@ impl From<ParsingError> for VerificationFailure {
 impl Display for VerificationFailure {
 	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
 		match self {
+			VerificationFailure::InputError(bx) => write!(f, "{}", &**bx),
 			VerificationFailure::ParsingError(bx) => write!(f, "{}", &**bx),
 			VerificationFailure::IncorrectNumVariables(bx) => write!(f, "Incorrect declared number of variables in CNF file {}:\nDeclared {} variables, found {}.", &bx.pos, &bx.expected, &bx.found),
 			VerificationFailure::IncorrectNumClauses(bx) => write!(f, "Incorrect declared number of clauses in CNF file {}:\nDeclared {} clauses, found {}.", &bx.pos, &bx.expected, &bx.found),
@@ -419,7 +441,8 @@ impl Display for VerificationFailure {
 impl Binary for VerificationFailure {
 	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
 		match self {
-			VerificationFailure::ParsingError(bx) => write!(f, "{}", &**bx),
+			VerificationFailure::InputError(bx) => write!(f, "{}", &**bx),
+			VerificationFailure::ParsingError(bx) => write!(f, "{:b}", &**bx),
 			VerificationFailure::IncorrectNumVariables(bx) => write!(f, "Incorrect declared number of variables in CNF file {:b}:\nDeclared {} variables, found {}.", &bx.pos, &bx.expected, &bx.found),
 			VerificationFailure::IncorrectNumClauses(bx) => write!(f, "Incorrect declared number of clauses in CNF file {:b}:\nDeclared {} clauses, found {}.", &bx.pos, &bx.expected, &bx.found),
 			VerificationFailure::MissingCnfSection(bx) => write!(f, "Missing section in CNF file {:b}:\nCould not find section header '{}'.", &bx.pos, &bx.header),
@@ -453,6 +476,15 @@ impl Binary for VerificationFailure {
 			VerificationFailure::Unrefuted(bx) => write!(f, "Invalid proof in ASR file {:b}:\nThe proof does not derive the empty clause at any point.", &**bx),
 		}
 	}
+}
+impl Error for VerificationFailure {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+		match self {
+			VerificationFailure::InputError(bx) => Some(bx),
+			VerificationFailure::ParsingError(bx) => Some(bx),
+			_ => None,
+		}
+    }
 }
 
 pub type VerificationResult<T> = Result<T, VerificationFailure>;

@@ -1,4 +1,5 @@
 use std::{
+	fmt::{self, Formatter, Display},
 	io::{Stdin},
 	path::{PathBuf},
 };
@@ -41,20 +42,33 @@ impl CheckerStats {
 		self.num_rups + self.num_srs + self.num_del_instructions
 	}
 }
+impl Display for CheckerStats {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		writeln!(f, "s {:<18} {}", "maximum variable", self.max_variable)?;
+		writeln!(f, "s {:<18} {}", "maximum id", self.max_index.map(|x| x.index()).unwrap_or(0usize))?;
+		writeln!(f, "s {:<18} {}", "premise clauses", self.num_premises)?;
+		writeln!(f, "s {:<18} {}", "core clauses", self.num_cores)?;
+		writeln!(f, "s {:<18} {}", "RUP inferences", self.num_rups)?;
+		writeln!(f, "s {:<18} {}", "SR inferences", self.num_srs)?;
+		writeln!(f, "s {:<18} {}", "deletion instructions", self.num_del_instructions)?;
+		writeln!(f, "s {:<18} {}", "clause deletions", self.num_atomic_dels)?;
+		writeln!(f, "s {:<18} {}", "total instructions", self.num_proof_instructions())?;
+		Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub struct CheckerConfig {
-	pub cnf_path: Option<PathBuf>,
-	pub asr_path: Option<PathBuf>,
-	pub cnf_compression: CompressionFormat,
-	pub asr_compression: CompressionFormat,
-	pub cnf_binary: bool,
-	pub asr_binary: bool,
 	pub check_core: bool,
 	pub check_derivation: bool,
 	pub check_refutation: bool,
 	pub permissive: bool,
-	pub print_stats: bool,
+}
+
+pub struct CheckerInputConfig {
+	pub path: Option<PathBuf>,
+	pub compression: CompressionFormat,
+	pub binary: bool,
 }
 
 pub struct AsrChecker<'a> {
@@ -68,24 +82,41 @@ impl<'a> AsrChecker<'a> {
 	const CnfHeader: [u8; 8] = [b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8];
 	const CoreHeader: [u8; 8] = [b'c', b'o', b'r', b'e', 0u8, 0u8, 0u8, 0u8];
 	const ProofHeader: [u8; 8] = [b'p', b'r', b'o', b'o', b'f', 0u8, 0u8, 0u8];
-	pub fn new<'b: 'a>(stdin: &'b Stdin, config: CheckerConfig) -> VerificationResult<AsrChecker<'a>> {
-		let cnf_input = match &config.cnf_path {
-			Some(path) => InputStream::<'a, VerificationFailure>::open(&path, config.cnf_compression)?,
+	pub fn process<'b: 'a>(cnf: CheckerInputConfig, asr: CheckerInputConfig, stdin: &'b Stdin, config: CheckerConfig) -> CheckingResult {
+		match AsrChecker::<'a>::new(cnf, asr, stdin, config) {
+			Ok(mut checker) => {
+				let res = checker.check();
+				CheckingResult {
+					result: res,
+					stats: checker.stats,
+				}
+			},
+			Err(err) => {
+				CheckingResult {
+					result: Err(err),
+					stats: CheckerStats::new(),
+				}
+			}
+		}
+	}
+	fn new<'b: 'a>(cnf: CheckerInputConfig, asr: CheckerInputConfig, stdin: &'b Stdin, config: CheckerConfig) -> VerificationResult<AsrChecker<'a>> {
+		let cnf_input = match &cnf.path {
+			Some(path) => InputStream::<'a, VerificationFailure>::open(&path, cnf.compression)?,
 			None => InputStream::<'a, VerificationFailure>::string("p cnf 0 0", "(dummy)"),
 		};
-		let asr_input = match &config.asr_path {
-			Some(path) => InputStream::<'a, VerificationFailure>::open(&path, config.asr_compression)?,
+		let asr_input = match &asr.path {
+			Some(path) => InputStream::<'a, VerificationFailure>::open(&path, asr.compression)?,
 			None => InputStream::<'a, VerificationFailure>::stdin(stdin),
 		};
-		let cnf: Box<dyn 'a + AsrParser<VerificationFailure>> = if config.cnf_binary {
-			Box::new(DimacsParser::<'a, VerificationFailure>::new(cnf_input))
+		let cnf: Box<dyn 'a + AsrParser<VerificationFailure>> = if cnf.binary {
+			Box::new(DimacsParser::<'a, VerificationFailure>::new(cnf_input, "CNF"))
 		} else {
-			Box::new(VbeParser::<'a, VerificationFailure>::new(cnf_input))
+			Box::new(VbeParser::<'a, VerificationFailure>::new(cnf_input, "CNF"))
 		};
-		let asr: Box<dyn 'a + AsrParser<VerificationFailure>> = if config.cnf_binary {
-			Box::new(DimacsParser::<'a, VerificationFailure>::new(asr_input))
+		let asr: Box<dyn 'a + AsrParser<VerificationFailure>> = if asr.binary {
+			Box::new(DimacsParser::<'a, VerificationFailure>::new(asr_input, "ASR"))
 		} else {
-			Box::new(VbeParser::<'a, VerificationFailure>::new(asr_input))
+			Box::new(VbeParser::<'a, VerificationFailure>::new(asr_input, "ASR"))
 		};
 		Ok(AsrChecker {
 			cnf: cnf,
@@ -95,7 +126,7 @@ impl<'a> AsrChecker<'a> {
 			config: config,
 		})
 	}
-	pub fn process(mut self) -> VerificationResult<()> {
+	pub fn check(&mut self) -> VerificationResult<()> {
 		let mut block = BacktrackBlock::new();
 		{
 			let mut set = ClauseSet::new();
@@ -529,5 +560,22 @@ impl<'a> AsrChecker<'a> {
 	fn error_unrefuted<T>(&mut self) -> VerificationResult<T> {
 		let pos = self.asr.position().clone();
 		Err(VerificationFailure::unrefuted(pos))
+	}
+}
+
+pub struct CheckingResult {
+	pub result: VerificationResult<()>,
+	pub stats: CheckerStats,
+}
+impl CheckingResult {
+	pub fn final_result(&self) -> Option<bool> {
+		match &self.result {
+			Ok(()) => Some(true),
+			Err(err) => if err.failure() {
+				Some(false)
+			} else {
+				None
+			},
+		}
 	}
 }

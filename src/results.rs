@@ -388,6 +388,64 @@ impl VerificationFailure {
 	pub fn unrefuted(pos: FilePosition) -> VerificationFailure {
 		VerificationFailure::Unrefuted(Box::<FilePosition>::new(pos))
 	}
+	pub fn failure(&self) -> bool {
+		match self {
+			VerificationFailure::IncorrectCore(_) |
+			VerificationFailure::UnchainedRup(_) |
+			VerificationFailure::NullChainRup(_) |
+			VerificationFailure::MissingChainRup(_) |
+			VerificationFailure::UnchainedSr(_) |
+			VerificationFailure::NullChainSr(_) |
+			VerificationFailure::MissingChainSr(_) |
+			VerificationFailure::MissingSuffixSr(_) |
+			VerificationFailure::UnsatisfiedSr(_) |
+			VerificationFailure::Unrefuted(_) => true,
+			_ => false,
+		}
+	}
+	pub fn binary(&self, cnfbin: bool, asrbin: bool) -> bool {
+		match self {
+			VerificationFailure::InputError(_) => false,
+			VerificationFailure::ParsingError(bx) => if bx.file_format() == "CNF" {
+				cnfbin
+			} else if bx.file_format() == "ASR" {
+				asrbin
+			} else {
+				panic!("Unrecognized format")
+			},
+			VerificationFailure::IncorrectNumVariables(_) |
+			VerificationFailure::IncorrectNumClauses(_) |
+			VerificationFailure::MissingCnfSection(_) |
+			VerificationFailure::DuplicatedCnfSection(_) |
+			VerificationFailure::PremiseTautology(_) |
+			VerificationFailure::PremiseRepetition(_) => cnfbin,
+			VerificationFailure::MissingCoreSection(_) |
+			VerificationFailure::DuplicatedCoreSection(_) |
+			VerificationFailure::MissingProofSection(_) |
+			VerificationFailure::DuplicatedProofSection(_) |
+			VerificationFailure::CoreTautology(_) |
+			VerificationFailure::InferenceTautology(_) |
+			VerificationFailure::CoreRepetition(_) |
+			VerificationFailure::InferenceRepetition(_) |
+			VerificationFailure::WitnessInconsistency(_) |
+			VerificationFailure::WitnessRepetition(_) |
+			VerificationFailure::ConflictCoreId(_) |
+			VerificationFailure::ConflictInferenceId(_) |
+			VerificationFailure::IncorrectCore(_) |
+			VerificationFailure::UnchainedRup(_) |
+			VerificationFailure::NullChainRup(_) |
+			VerificationFailure::MissingChainRup(_) |
+			VerificationFailure::UnchainedSr(_) |
+			VerificationFailure::NullChainSr(_) |
+			VerificationFailure::MissingChainSr(_) |
+			VerificationFailure::MissingLateralSr(_) |
+			VerificationFailure::RepeatedLateralSr(_) |
+			VerificationFailure::MissingSuffixSr(_) |
+			VerificationFailure::UnsatisfiedSr(_) |
+			VerificationFailure::MissingDeletion(_) |
+			VerificationFailure::Unrefuted(_) => asrbin
+		}
+	}
 }
 impl From<io::Error> for VerificationFailure {
 	fn from(err: io::Error) -> VerificationFailure {

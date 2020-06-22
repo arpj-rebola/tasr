@@ -1,8 +1,9 @@
 [package]
-name = "tasr2"
-version = "0.1.0"
+name = "tasr"
+version = "0.2.0"
 authors = ["Adrian Rebola-Pardo <arpj.rebola@gmail.com>"]
 edition = "2018"
+description = "ASR proof checker for SAT solving"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

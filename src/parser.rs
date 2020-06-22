@@ -13,9 +13,16 @@ use crate::{
 };
 
 #[derive(Debug)]
+pub struct LexingError {
+    pos: FilePosition,
+    format: String,
+}
+
+#[derive(Debug)]
 pub struct ExpectedField {
     field: String,
     pos: FilePosition,
+    format: String,
 }
 
 #[derive(Debug)]
@@ -24,53 +31,71 @@ pub struct OutOfRangeField {
     found: String,
     range: String,
     pos: FilePosition,
+    format: String,
 }
 
 #[derive(Debug)]
 pub enum ParsingError {
-    InvalidCharacter(Box<FilePosition>),
-    InvalidNumber(Box<FilePosition>),
-    InvalidLetter(Box<FilePosition>),
-    InvalidHeader(Box<FilePosition>),
-    InvalidVbeNumber(Box<FilePosition>),
-    InvalidVbeHeader(Box<FilePosition>),
-    OutOfRangeI64(Box<FilePosition>),
-    OutOfRangeU64(Box<FilePosition>),
-    OutOfRangeHeader(Box<FilePosition>),
+    InvalidCharacter(Box<LexingError>),
+    InvalidNumber(Box<LexingError>),
+    InvalidLetter(Box<LexingError>),
+    InvalidHeader(Box<LexingError>),
+    InvalidVbeNumber(Box<LexingError>),
+    InvalidVbeHeader(Box<LexingError>),
+    OutOfRangeI64(Box<LexingError>),
+    OutOfRangeU64(Box<LexingError>),
+    OutOfRangeHeader(Box<LexingError>),
     ExpectedField(Box<ExpectedField>),
     OutOfRangeField(Box<OutOfRangeField>),
 }
 impl Display for ParsingError {
 	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
 		match self {
-            ParsingError::InvalidCharacter(bx) => write!(f, "Invalid character in file {}.", &**bx),
-            ParsingError::InvalidNumber(bx) => write!(f, "Invalid number in file {}.", &**bx),
-            ParsingError::InvalidLetter(bx) => write!(f, "Invalid letter in file {}.", &**bx),
-            ParsingError::InvalidHeader(bx) => write!(f, "Invalid header in file {}.", &**bx),
-            ParsingError::InvalidVbeNumber(bx) => write!(f, "Invalid variable-bit encoded integer in file {}:\nEOF found before terminating character.", &**bx),
-            ParsingError::InvalidVbeHeader(bx) => write!(f, "Invalid variable-bit encoded header in file {}:\nEOF found within 8 header characters.", &**bx),
-            ParsingError::OutOfRangeI64(bx) => write!(f, "Out of range number in file {}:\nNumber does not fit into an i64 integer.", &**bx),
-            ParsingError::OutOfRangeU64(bx) => write!(f, "Out of range number in file {}:\nNumber does not fit into an u64 integer.", &**bx),
-            ParsingError::OutOfRangeHeader(bx) => write!(f, "Out of range header in file {}:\nHeader exceeds the 8-character limit.", &**bx),
-            ParsingError::ExpectedField(bx) => write!(f, "Unexpected input in file {}:\nExpected {}.", &bx.pos, &bx.field),
-            ParsingError::OutOfRangeField(bx) => write!(f, "Out of range input in file {}:\nExpected {}, found {} but the admissible range is {}.", &bx.pos, &bx.field, &bx.found, &bx.range),
+            ParsingError::InvalidCharacter(bx) => write!(f, "Invalid character in {} file {}.", &bx.format, &bx.pos),
+            ParsingError::InvalidNumber(bx) => write!(f, "Invalid number in {} file {}.", &bx.format, &bx.pos),
+            ParsingError::InvalidLetter(bx) => write!(f, "Invalid letter in {} file {}.", &bx.format, &bx.pos),
+            ParsingError::InvalidHeader(bx) => write!(f, "Invalid header in {} file {}.", &bx.format, &bx.pos),
+            ParsingError::InvalidVbeNumber(bx) => write!(f, "Invalid variable-bit encoded integer in {} file {}:\nEOF found before terminating character.", &bx.format, &bx.pos),
+            ParsingError::InvalidVbeHeader(bx) => write!(f, "Invalid variable-bit encoded header in {} file {}:\nEOF found within 8 header characters.", &bx.format, &bx.pos),
+            ParsingError::OutOfRangeI64(bx) => write!(f, "Out of range number in {} file {}:\nNumber does not fit into an i64 integer.", &bx.format, &bx.pos),
+            ParsingError::OutOfRangeU64(bx) => write!(f, "Out of range number in {} file {}:\nNumber does not fit into an u64 integer.", &bx.format, &bx.pos),
+            ParsingError::OutOfRangeHeader(bx) => write!(f, "Out of range header in {} file {}:\nHeader exceeds the 8-character limit.", &bx.format, &bx.pos),
+            ParsingError::ExpectedField(bx) => write!(f, "Unexpected input in {} file {}:\nExpected {}.", &bx.format, &bx.pos, &bx.field),
+            ParsingError::OutOfRangeField(bx) => write!(f, "Out of range input in {} file {}:\nExpected {}, found {} but the admissible range is {}.", &bx.format, &bx.pos, &bx.field, &bx.found, &bx.range),
         }
     }
 }
 impl Binary for ParsingError {
 	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
 		match self {
-            ParsingError::InvalidCharacter(bx) => write!(f, "Invalid character in file {:b}.", &**bx),
-            ParsingError::InvalidNumber(bx) => write!(f, "Invalid number in file {:b}.", &**bx),
-            ParsingError::InvalidLetter(bx) => write!(f, "Invalid letter in file {:b}.", &**bx),
-            ParsingError::InvalidHeader(bx) => write!(f, "Invalid header in file {:b}.", &**bx),
-            ParsingError::InvalidVbeNumber(bx) => write!(f, "Invalid variable-bit encoded integer in file {:b}:\nEOF found before terminating character.", &**bx),
-            ParsingError::InvalidVbeHeader(bx) => write!(f, "Invalid variable-bit encoded header in file {:b}:\nEOF found within 8 header characters.", &**bx),
-            ParsingError::OutOfRangeI64(bx) => write!(f, "Out of range number in file {:b}:\nNumber does not fit into an i64 integer.", &**bx),
-            ParsingError::OutOfRangeU64(bx) => write!(f, "Out of range number in file {:b}:\nNumber does not fit into an u64 integer.", &**bx),
-            ParsingError::OutOfRangeHeader(bx) => write!(f, "Out of range header in file {:b}:\nHeader exceeds the 8-character limit.", &**bx),
-            ParsingError::ExpectedField(bx) => write!(f, "Unexpected input in file {:b}:\nExpected {}.", &bx.pos, &bx.field),
-            ParsingError::OutOfRangeField(bx) => write!(f, "Out of range input in file {:b}:\nExpected {}, found {} but the admissible range is {}.", &bx.pos, &bx.field, &bx.found, &bx.range),
+            ParsingError::InvalidCharacter(bx) => write!(f, "Invalid character in {} file {:b}.", &bx.format, &bx.pos),
+            ParsingError::InvalidNumber(bx) => write!(f, "Invalid number in {} file {:b}.", &bx.format, &bx.pos),
+            ParsingError::InvalidLetter(bx) => write!(f, "Invalid letter in {} file {:b}.", &bx.format, &bx.pos),
+            ParsingError::InvalidHeader(bx) => write!(f, "Invalid header in {} file {:b}.", &bx.format, &bx.pos),
+            ParsingError::InvalidVbeNumber(bx) => write!(f, "Invalid variable-bit encoded integer in {} file {:b}:\nEOF found before terminating character.", &bx.format, &bx.pos),
+            ParsingError::InvalidVbeHeader(bx) => write!(f, "Invalid variable-bit encoded header in {} file {:b}:\nEOF found within 8 header characters.", &bx.format, &bx.pos),
+            ParsingError::OutOfRangeI64(bx) => write!(f, "Out of range number in {} file {:b}:\nNumber does not fit into an i64 integer.", &bx.format, &bx.pos),
+            ParsingError::OutOfRangeU64(bx) => write!(f, "Out of range number in {} file {:b}:\nNumber does not fit into an u64 integer.", &bx.format, &bx.pos),
+            ParsingError::OutOfRangeHeader(bx) => write!(f, "Out of range header in {} file {:b}:\nHeader exceeds the 8-character limit.", &bx.format, &bx.pos),
+            ParsingError::ExpectedField(bx) => write!(f, "Unexpected input in {} file {:b}:\nExpected {}.", &bx.format, &bx.pos, &bx.field),
+            ParsingError::OutOfRangeField(bx) => write!(f, "Out of range input in {} file {:b}:\nExpected {}, found {} but the admissible range is {}.", &bx.format, &bx.pos, &bx.field, &bx.found, &bx.range),
+        }
+    }
+}
+impl ParsingError {
+    pub fn file_format(&self) -> &str {
+        match self {
+            ParsingError::InvalidCharacter(bx) |
+            ParsingError::InvalidNumber(bx) |
+            ParsingError::InvalidLetter(bx) |
+            ParsingError::InvalidHeader(bx) |
+            ParsingError::InvalidVbeNumber(bx) |
+            ParsingError::InvalidVbeHeader(bx) |
+            ParsingError::OutOfRangeI64(bx) |
+            ParsingError::OutOfRangeU64(bx) |
+            ParsingError::OutOfRangeHeader(bx) => &bx.format,
+            ParsingError::ExpectedField(bx) => &bx.format,
+            ParsingError::OutOfRangeField(bx) => &bx.format,
         }
     }
 }
@@ -112,12 +137,14 @@ enum DimacsLexeme {
 
 pub struct DimacsParser<'a, E: Error + From<ParsingError> + From<io::Error>> {
     input: InputStream<'a, E>,
+    format: &'a str,
     cache: Result<Option<DimacsLexeme>, E>,
 }
 impl<'a, E: Error + From<ParsingError> + From<io::Error>> DimacsParser<'a, E> {
-    pub fn new(is: InputStream<'a, E>) -> DimacsParser<'a, E> {
+    pub fn new(is: InputStream<'a, E>, format: &'a str) -> DimacsParser<'a, E> {
         let mut parser = DimacsParser::<'a, E> {
             input: is,
+            format: format,
             cache: Ok(None),
         };
         parser.cache = parser.read();
@@ -212,27 +239,46 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> DimacsParser<'a, E> {
         } }
     }
     fn error_invalid_character<T>(&self) -> Result<T, E> {
-        Err(E::from(ParsingError::InvalidCharacter(Box::new(self.input.position().clone()))))
+        Err(E::from(ParsingError::InvalidCharacter(Box::new(LexingError {
+            pos: self.input.position().clone(),
+            format: self.format.to_string(),
+        }))))
     }
     fn error_invalid_number<T>(&self) -> Result<T, E> {
-        Err(E::from(ParsingError::InvalidNumber(Box::new(self.input.position().clone()))))
+        Err(E::from(ParsingError::InvalidNumber(Box::new(LexingError {
+            pos: self.input.position().clone(),
+            format: self.format.to_string(),
+        }))))
     }
     fn error_out_of_range_i64<T>(&self) -> Result<T, E> {
-        Err(E::from(ParsingError::OutOfRangeI64(Box::new(self.input.position().clone()))))
+        Err(E::from(ParsingError::OutOfRangeI64(Box::new(LexingError {
+            pos: self.input.position().clone(),
+            format: self.format.to_string(),
+        }))))
     }
     fn error_invalid_letter<T>(&self) -> Result<T, E> {
-        Err(E::from(ParsingError::InvalidLetter(Box::new(self.input.position().clone()))))
+        Err(E::from(ParsingError::InvalidLetter(Box::new(LexingError {
+            pos: self.input.position().clone(),
+            format: self.format.to_string(),
+        }))))
     }
     fn error_invalid_header<T>(&self) -> Result<T, E> {
-        Err(E::from(ParsingError::InvalidHeader(Box::new(self.input.position().clone()))))
+        Err(E::from(ParsingError::InvalidHeader(Box::new(LexingError {
+            pos: self.input.position().clone(),
+            format: self.format.to_string(),
+        }))))
     }
     fn error_out_of_range_header<T>(&self) -> Result<T, E> {
-        Err(E::from(ParsingError::OutOfRangeHeader(Box::new(self.input.position().clone()))))
+        Err(E::from(ParsingError::OutOfRangeHeader(Box::new(LexingError {
+            pos: self.input.position().clone(),
+            format: self.format.to_string(),
+        }))))
     }
     fn error_expected_field<T>(&self, field: &str) -> Result<T, E> {
         Err(E::from(ParsingError::ExpectedField(Box::new(ExpectedField {
             field: field.to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_id<T>(&self, num: i64) -> Result<T, E> {
@@ -241,6 +287,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> DimacsParser<'a, E> {
             range: format!("[{} .. {}]", 1i64, ClauseIndex::MaxValue),
             field: "clause identifier".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_literal<T>(&self, num: i64) -> Result<T, E> {
@@ -249,6 +296,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> DimacsParser<'a, E> {
             range: format!("[{} .. {}] U [{} .. {}]", -Literal::MaxValue, -1i64, 1i64, Literal::MaxValue),
             field: "literal".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_variable<T>(&self, num: i64) -> Result<T, E> {
@@ -257,6 +305,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> DimacsParser<'a, E> {
             range: format!("[{} .. {}]", 1i64, Variable::MaxValue),
             field: "variable".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_num_variables<T>(&self, num: i64) -> Result<T, E> {
@@ -265,6 +314,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> DimacsParser<'a, E> {
             range: format!("[{} .. {}]", 0i64, Variable::MaxValue),
             field: "number of variables".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_num_clauses<T>(&self, num: i64) -> Result<T, E> {
@@ -274,6 +324,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> DimacsParser<'a, E> {
             range: format!("[{} .. {}]", 1i64, max),
             field: "number of clauses".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
 }
@@ -400,16 +451,18 @@ enum VbeLexeme {
 pub struct VbeParser<'a, E: Error + From<ParsingError> + From<io::Error>> {
     input: InputStream<'a, E>,
     cache: Result<Option<VbeLexeme>, E>,
+    format: &'a str,
 }
 impl<'a, E: Error + From<ParsingError> + From<io::Error>> VbeParser<'a, E> {
     const LowercaseK: u64 = b'k' as u64;
     const LowercaseR: u64 = b'r' as u64;
     const LowercaseS: u64 = b's' as u64;
     const LowercaseD: u64 = b'd' as u64;
-    pub fn new(is: InputStream<'a, E>) -> VbeParser<'a, E> {
+    pub fn new(is: InputStream<'a, E>, format: &'a str) -> VbeParser<'a, E> {
         let mut parser = VbeParser::<'a, E> {
             input: is,
             cache: Ok(None),
+            format: format,
         };
         parser.cache = parser.read_number();
         parser
@@ -460,18 +513,28 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> VbeParser<'a, E> {
         Ok(Some(VbeLexeme::Header(hd)))
     }
     fn error_out_of_range_number<T>(&self) -> Result<T, E> {
-        Err(E::from(ParsingError::OutOfRangeU64(Box::new(self.input.position().clone()))))
+        Err(E::from(ParsingError::OutOfRangeU64(Box::new(LexingError {
+            pos: self.input.position().clone(),
+            format: self.format.to_string(),
+        }))))
     }
     fn error_invalid_vbe_number<T>(&self) -> Result<T, E> {
-        Err(E::from(ParsingError::InvalidVbeNumber(Box::new(self.input.position().clone()))))
+        Err(E::from(ParsingError::InvalidVbeNumber(Box::new(LexingError {
+            pos: self.input.position().clone(),
+            format: self.format.to_string(),
+        }))))
     }
     fn error_invalid_vbe_header<T>(&self) -> Result<T, E> {
-        Err(E::from(ParsingError::InvalidVbeHeader(Box::new(self.input.position().clone()))))
+        Err(E::from(ParsingError::InvalidVbeHeader(Box::new(LexingError {
+            pos: self.input.position().clone(),
+            format: self.format.to_string(),
+        }))))
     }
     fn error_expected_field<T>(&self, field: &str) -> Result<T, E> {
         Err(E::from(ParsingError::ExpectedField(Box::new(ExpectedField {
             field: field.to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_id<T>(&self, num: u64) -> Result<T, E> {
@@ -480,6 +543,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> VbeParser<'a, E> {
             range: format!("[{} .. {}]", 1i64, ClauseIndex::MaxValue),
             field: "clause identifier".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_literal<T>(&self, num: u64) -> Result<T, E> {
@@ -488,6 +552,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> VbeParser<'a, E> {
             range: format!("[{} .. {}]", 2u64, u32::max_value()),
             field: "literal".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_atom<T>(&self, num: u64) -> Result<T, E> {
@@ -496,6 +561,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> VbeParser<'a, E> {
             range: format!("[{} .. {}]", 0u64, u32::max_value()),
             field: "literal, top or bottom".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_variable<T>(&self, num: u64) -> Result<T, E> {
@@ -504,6 +570,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> VbeParser<'a, E> {
             range: format!("[{} .. {}]", 1i64, Variable::MaxValue),
             field: "variable".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_num_variables<T>(&self, num: u64) -> Result<T, E> {
@@ -512,6 +579,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> VbeParser<'a, E> {
             range: format!("[{} .. {}]", 0i64, Variable::MaxValue),
             field: "number of variables".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
     fn error_out_of_range_num_clauses<T>(&self, num: u64) -> Result<T, E> {
@@ -521,6 +589,7 @@ impl<'a, E: Error + From<ParsingError> + From<io::Error>> VbeParser<'a, E> {
             range: format!("[{} .. {}]", 1i64, max),
             field: "number of clauses".to_string(),
             pos: self.input.position().clone(),
+            format: self.format.to_string(),
         }))))
     }
 }

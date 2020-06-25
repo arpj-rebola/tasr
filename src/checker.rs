@@ -1,17 +1,18 @@
 use std::{
 	fmt::{self, Formatter, Display},
 	io::{Stdin},
+	mem::{self},
 	path::{PathBuf},
 };
 
 use crate::{
-	assignment::{Block, InsertionTest, BacktrackBlock, SubstitutionStack},
+	assignment::{Block, InsertionTest, BacktrackBlock, Substitution},
 	chaindb::{ChainDb},
-	clausedb::{ClauseDb, ClauseIndex, ClauseSet, ClauseDbMeta, ClauseContainer, RawChainContainer},
+	clausedb::{ClauseDb, ClauseIndex, ClauseSet, ClauseDbMeta, ClauseContainer, RawChainContainer, WitnessContainer},
 	input::{CompressionFormat, InputStream},
 	parser::{AsrParser, DimacsParser, VbeParser, AsrInstructionKind, CnfHeaderStats},
 	results::{VerificationResult, VerificationFailure},
-	unitpropagation::{UnitPropagator, PropagationResult},
+	unitpropagation::{UnitPropagator, PropagationResult, PropagationError},
 	variable::{Variable, Literal, MaybeVariable},
 };
 
@@ -211,9 +212,8 @@ impl<'a> AsrChecker<'a> {
 			if self.config.check_core {
 				let rf = self.db.retrieve(id).unwrap();
 				let del = set.delete(&rf, unsafe { block.mut_block() });
-				match del {
-					Some(()) => (),
-					None => self.error_incorrect_core(id)?,
+				if del.is_none() {
+					self.error_incorrect_core(id)?
 				}
 			}
 		}
@@ -221,7 +221,7 @@ impl<'a> AsrChecker<'a> {
 	}
 	fn check_asr_proof(&mut self, block: &mut BacktrackBlock) -> VerificationResult<()> {
 		let mut chain = ChainDb::new();
-		let mut subst = SubstitutionStack::new();
+		let mut subst = Substitution::new();
 		let mut refutation = false;
 		loop { match self.asr.parse_proof()? {
 			Some(AsrInstructionKind::Rup(id)) => {
@@ -230,15 +230,11 @@ impl<'a> AsrChecker<'a> {
 				self.parse_db_chain(&mut chain, id, None)?;
 				if self.config.check_derivation {
 					let result = {
-						let mut up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst);
-						let result = up.propagate_rup(id, self.config.permissive).unwrap();
-						if result.error() || !result.conflict() {
-							up.freeze();
-						}
-						result
+						let up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst, id).unwrap();
+						up.propagate_rup(self.config.permissive)
 					};
-					if result.error() || !result.conflict() {
-						self.error_incorrect_rup(&chain, id, result)?
+					if let Err(bx) = result {
+						self.error_incorrect_rup(id, bx)?
 					}
 				}
 				refutation |= empty;
@@ -247,31 +243,17 @@ impl<'a> AsrChecker<'a> {
 				self.stats.num_srs += 1usize;
 				let empty = self.parse_db_clause(id, unsafe { block.mut_block() } , true)?;
 				self.parse_witness(&mut subst)?;
-				if self.config.check_derivation {
-					if !self.check_witness(&mut subst, block, id) {
-						self.error_unsatisfied_sr(&subst, id)?
-					}
-				}
+				self.parse_db_chain(&mut chain, id, None)?;
 				while let Some(lat) = self.asr.parse_chain()? {
 					self.parse_db_chain(&mut chain, id, Some(lat))?;
 				}
 				if self.config.check_derivation {
-					let (result, optcid) = {
-						let mut up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst);
-						let mut it = self.db.iter();
-						loop { match it.next() {
-							Some(cid) => {
-								let result = up.propagate_sr(id, cid, self.config.permissive).unwrap();
-								if result.error() || !result.conflict() {
-									up.freeze();
-									break (result, Some(cid));
-								}
-							},
-							None => break (PropagationResult::Stable, None)
-						} }
+					let result = {
+						let up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst, id).unwrap();
+						up.propagate_wsr(self.config.permissive)
 					};
-					if result.error() || !result.conflict() {
-						self.error_incorrect_sr(&chain, &subst, id, optcid.unwrap(), result)?
+					if let Err(bx) = result {
+						self.error_incorrect_wsr(id, bx)?
 					}
 				}
 				refutation |= empty;
@@ -345,7 +327,7 @@ impl<'a> AsrChecker<'a> {
 			None => self.error_conflict_id(id, proof)?,
 		}
 	}
-	fn parse_witness(&mut self, subst: &mut SubstitutionStack) -> VerificationResult<()> {
+	fn parse_witness(&mut self, subst: &mut Substitution) -> VerificationResult<()> {
 		while let Some((var, lit)) = self.asr.parse_witness()? {
 			match subst.set(var, lit) {
 				InsertionTest::Alright => (),
@@ -354,44 +336,31 @@ impl<'a> AsrChecker<'a> {
 		}
 		Ok(())
 	}
-	fn parse_db_chain(&mut self, chain: &mut ChainDb, id: ClauseIndex, latid: Option<ClauseIndex>) -> VerificationResult<()> {
-		match latid {
-			Some(lid) => if self.db.retrieve(lid).is_none() || id == lid {
-				self.error_missing_lateral_sr(id, lid)?;
+	fn parse_db_chain(&mut self, chain: &mut ChainDb, id: ClauseIndex, lat: Option<ClauseIndex>) -> VerificationResult<()> {
+		let lid = match lat {
+			Some(lid) => {
+				if self.db.retrieve(lid).is_none() || id == lid {
+					self.error_missing_lateral_sr(id, lid)?;
+				}
+				lid
 			},
-			None => (),
-		}
+			None => id, 
+		};
 		let repeated = {
-			match chain.open(latid) {
-				Some(mut chw) => {
-					while let Some(id) = self.asr.parse_chain()? {
-						chw.write(id);
-					}
-					chw.close();
-					false
-				},
-				None => true,
+			if let Some(mut chw) = chain.open(lid) {
+				while let Some(id) = self.asr.parse_chain()? {
+					chw.write(id);
+				}
+				chw.close();
+				false
+			} else {
+				true
 			}
 		};
 		if repeated {
-			self.error_repeated_lateral_sr(chain, id, latid.unwrap())
-		} else {
-			Ok(())
+			self.error_repeated_lateral_sr(chain, id, lid)?
 		}
-	}
-	fn check_witness(&mut self, subst: &mut SubstitutionStack, block: &mut BacktrackBlock, id: ClauseIndex) -> bool {
-		let rf = self.db.retrieve(id).unwrap();
-		let mut it = rf.iter();
-		let result = loop { match it.next() {
-			Some(lit) => match block.set(lit.complement()) {
-				InsertionTest::Conflict => break false,
-				_ => (),
-			},
-			None => break true,
-		} };
-		block.clear();
-		subst.clear();
-		result
+		Ok(())
 	}
 	fn error_missing_cnf_section<T>(&self) -> VerificationResult<T> {
 		Err(VerificationFailure::missing_cnf_section(self.cnf.position().clone()))
@@ -452,7 +421,7 @@ impl<'a> AsrChecker<'a> {
 			(Some(true), false) => Err(VerificationFailure::inference_tautology(pos, num, clause, lit)),
 		}
 	}
-	fn error_invalid_witness<T>(&mut self, subst: &mut SubstitutionStack, var: Variable, lit: Literal) -> VerificationResult<T> {
+	fn error_invalid_witness<T>(&mut self, subst: &mut Substitution, var: Variable, lit: Literal) -> VerificationResult<T> {
 		let mut witness = subst.extract();
 		witness.0.push((var, lit));
 		while let Some((v, l)) = self.asr.parse_witness()? {
@@ -485,50 +454,44 @@ impl<'a> AsrChecker<'a> {
 		let pos = self.asr.position().clone();
 		Err(VerificationFailure::incorrect_core(pos, num, id, cls))
 	}
-	fn error_incorrect_rup<T>(&mut self, chain: &ChainDb, id: ClauseIndex, result: PropagationResult) -> VerificationResult<T> {
+	fn error_incorrect_rup<T>(&mut self, id: ClauseIndex, bx: Box<PropagationError>) -> VerificationResult<T> {
 		let pos = self.asr.position().clone();
 		let num = self.stats.num_proof_instructions();
 		let cls = self.db.extract(id).unwrap();
-		let chn = chain.retrieve(None).unwrap();
-		let idchn = self.db.extract_chain(chn, result.cutoff()).unwrap();
-		if result.missing() {
-			let issue = chn.get(result.cutoff()).unwrap();
-			Err(VerificationFailure::missing_rup(pos, num, cls, *issue, idchn))
-		} else if result.null() {
-			let issue = chn.get(result.cutoff()).unwrap();
-			let issuecls = self.db.extract(*issue).unwrap();
-			Err(VerificationFailure::null_rup(pos, num, cls, *issue, issuecls, idchn))
-		} else {
-			Err(VerificationFailure::unchained_rup(pos, num, cls, idchn))
+		let idchn = self.db.extract_chain(&bx.chain, bx.length).unwrap();
+		match bx.result {
+			PropagationResult::Missing => {
+				let issue = *bx.chain.get(bx.length).unwrap();
+				Err(VerificationFailure::missing_rup(pos, num, cls, issue, idchn))
+			},
+			PropagationResult::Null => {
+				let issue = *bx.chain.get(bx.length).unwrap();
+				let issuecls = self.db.extract(issue).unwrap();
+				Err(VerificationFailure::null_rup(pos, num, cls, issue, issuecls, idchn))
+			},
+			_ => Err(VerificationFailure::unchained_rup(pos, num, cls, idchn)),
 		}
 	}
-	fn error_incorrect_sr<T>(&mut self, chain: &ChainDb, subst: &SubstitutionStack, id: ClauseIndex, latid: ClauseIndex, result: PropagationResult) -> VerificationResult<T> {
+	fn error_incorrect_wsr<T>(&mut self, id: ClauseIndex, mut bx: Box<PropagationError>) -> VerificationResult<T> {
 		let pos = self.asr.position().clone();
 		let num = self.stats.num_proof_instructions();
-		let wtn = subst.extract();
 		let cls = self.db.extract(id).unwrap();
+		let idchn = self.db.extract_chain(&bx.chain, bx.length).unwrap();
+		let latid = bx.lateral;
 		let latcls = self.db.extract(latid).unwrap();
-		let chn = chain.extract(Some(latid));
-		let idchn = self.db.extract_chain(&chn, result.cutoff()).unwrap();
-		if result.missing() {
-			let issue = chn.get(result.cutoff()).unwrap();
-			Err(VerificationFailure::missing_sr(pos, num, cls, latid, latcls, wtn, *issue, idchn))
-		} else if result.null() {
-			let issue = chn.get(result.cutoff()).unwrap();
-			let issuecls = self.db.extract(*issue).unwrap();
-			Err(VerificationFailure::null_sr(pos, num, cls, latid, latcls, wtn, *issue, issuecls, idchn))
-		} else if chain.exists(latid) {
-			Err(VerificationFailure::unchained_sr(pos, num, cls, latid, latcls, wtn, idchn))
-		} else {
-			Err(VerificationFailure::missing_suffix_sr(pos, num, cls, wtn, latid, latcls))
+		let wtn = mem::replace(&mut bx.subst, WitnessContainer(Vec::new()));
+		match bx.result {
+			PropagationResult::Missing => {
+				let issue = *bx.chain.get(bx.length).unwrap();
+				Err(VerificationFailure::missing_sr(pos, num, cls, Some((latid, latcls)), wtn, issue, idchn))
+			},
+			PropagationResult::Null => {
+				let issue = *bx.chain.get(bx.length).unwrap();
+				let issuecls = self.db.extract(issue).unwrap();
+				Err(VerificationFailure::null_sr(pos, num, cls, Some((latid, latcls)), wtn, issue, issuecls, idchn))
+			},
+			_ => Err(VerificationFailure::unchained_sr(pos, num, cls, Some((latid, latcls)), wtn, idchn)),
 		}
-	}
-	fn error_unsatisfied_sr<T>(&mut self, subst: &SubstitutionStack, id: ClauseIndex) -> VerificationResult<T> {
-		let pos = self.asr.position().clone();
-		let num = self.stats.num_proof_instructions();
-		let cls = self.db.extract(id).unwrap();
-		let wtn = subst.extract();
-		Err(VerificationFailure::unsatisfied_sr(pos, num, cls, wtn))
 	}
 	fn error_missing_lateral_sr<T>(&mut self, id: ClauseIndex, latid: ClauseIndex) -> VerificationResult<T> {
 		let pos = self.asr.position().clone();
@@ -545,7 +508,7 @@ impl<'a> AsrChecker<'a> {
 		let num = self.stats.num_proof_instructions();
 		let cls = self.db.extract(id).unwrap();
 		let latcls = self.db.extract(latid).unwrap();
-		let chn1 = chain.extract(Some(latid));
+		let chn1 = chain.extract(latid).unwrap();
 		let mut chn2 = Vec::<ClauseIndex>::new();
 		while let Some(cid) = self.asr.parse_chain()? {
 			chn2.push(cid);

@@ -47,22 +47,19 @@ pub struct ConflictId {
 }
 
 #[derive(Debug)]
-pub struct StableChain {
-	num: usize,
-	clause: ClauseContainer,
-	witness_lateral: Option<(WitnessContainer, ClauseIndex, ClauseContainer)>,
-	chain: ChainContainer,
-	pos: FilePosition,
+pub struct LateralInfo {
+	witness: WitnessContainer,
+	lateral: Option<(ClauseIndex, ClauseContainer)>,
 }
 
 #[derive(Debug)]
 pub struct IncorrectChain {
 	num: usize,
 	clause: ClauseContainer,
-	witness: Option<WitnessContainer>,
-	lateral: Option<(ClauseIndex, ClauseContainer)>,
 	chain: ChainContainer,
-	issue: (ClauseIndex, Option<ClauseContainer>),
+	issue: Option<ClauseIndex>,
+	issue_clause: Option<ClauseContainer>,
+	lateral: Option<LateralInfo>,
 	pos: FilePosition,
 }
 
@@ -81,23 +78,6 @@ pub struct RepeatedLateral {
 	clause: ClauseContainer,
 	lateral: (ClauseIndex, ClauseContainer),
 	chains: (RawChainContainer, RawChainContainer),
-	pos: FilePosition,
-}
-
-#[derive(Debug)]
-pub struct MissingSuffix {
-	num: usize,
-	clause: ClauseContainer,
-	witness: WitnessContainer,
-	lateral: (ClauseIndex, ClauseContainer),
-	pos: FilePosition,
-}
-
-#[derive(Debug)]
-pub struct UnsatisfyingWitness {
-	num: usize,
-	clause: ClauseContainer,
-	witness: WitnessContainer,
 	pos: FilePosition,
 }
 
@@ -131,16 +111,14 @@ pub enum VerificationFailure {
 	ConflictCoreId(Box<ConflictId>),
 	ConflictInferenceId(Box<ConflictId>),
 	IncorrectCore(Box<ConflictId>),
-	UnchainedRup(Box<StableChain>),
+	UnchainedRup(Box<IncorrectChain>),
 	NullChainRup(Box<IncorrectChain>),
 	MissingChainRup(Box<IncorrectChain>),
-	UnchainedSr(Box<StableChain>),
-	NullChainSr(Box<IncorrectChain>),
-	MissingChainSr(Box<IncorrectChain>),
-	MissingLateralSr(Box<MissingLateral>),
-	RepeatedLateralSr(Box<RepeatedLateral>),
-	MissingSuffixSr(Box<MissingSuffix>),
-	UnsatisfiedSr(Box<UnsatisfyingWitness>),
+	UnchainedWsr(Box<IncorrectChain>),
+	NullChainWsr(Box<IncorrectChain>),
+	MissingChainWsr(Box<IncorrectChain>),
+	RepeatedLateral(Box<RepeatedLateral>),
+	MissingLateral(Box<MissingLateral>),
 	MissingDeletion(Box<MissingDeletion>),
 	Unrefuted(Box<FilePosition>),
 }
@@ -282,11 +260,13 @@ impl VerificationFailure {
 		}))
 	}
 	pub fn unchained_rup(pos: FilePosition, num: usize, clause: ClauseContainer, chain: ChainContainer) -> VerificationFailure {
-		VerificationFailure::UnchainedRup(Box::<StableChain>::new(StableChain {
+		VerificationFailure::UnchainedRup(Box::<IncorrectChain>::new(IncorrectChain {
 			num: num,
 			clause: clause,
-			witness_lateral: None,
 			chain: chain,
+			issue: None,
+			issue_clause: None,
+			lateral: None,
 			pos: pos,
 		}))
 	}
@@ -294,10 +274,10 @@ impl VerificationFailure {
 		VerificationFailure::NullChainRup(Box::<IncorrectChain>::new(IncorrectChain {
 			num: num,
 			clause: clause,
-			witness: None,
-			lateral: None,
 			chain: chain,
-			issue: (issueid, Some(issueclause)),
+			issue: Some(issueid),
+			issue_clause: Some(issueclause),
+			lateral: None,
 			pos: pos,
 		}))
 	}
@@ -305,46 +285,57 @@ impl VerificationFailure {
 		VerificationFailure::MissingChainRup(Box::<IncorrectChain>::new(IncorrectChain {
 			num: num,
 			clause: clause,
-			witness: None,
+			chain: chain,
+			issue: Some(issueid),
+			issue_clause: None,
 			lateral: None,
-			chain: chain,
-			issue: (issueid, None),
 			pos: pos,
 		}))
 	}
-	pub fn unchained_sr(pos: FilePosition, num: usize, clause: ClauseContainer, latid: ClauseIndex, latclause: ClauseContainer, witness: WitnessContainer, chain: ChainContainer) -> VerificationFailure {
-		VerificationFailure::UnchainedSr(Box::<StableChain>::new(StableChain {
+	pub fn unchained_sr(pos: FilePosition, num: usize, clause: ClauseContainer, lat: Option<(ClauseIndex, ClauseContainer)>, witness: WitnessContainer, chain: ChainContainer) -> VerificationFailure {
+		VerificationFailure::UnchainedWsr(Box::<IncorrectChain>::new(IncorrectChain {
 			num: num,
 			clause: clause,
-			witness_lateral: Some((witness, latid, latclause)),
 			chain: chain,
+			issue: None,
+			issue_clause: None,
+			lateral: Some(LateralInfo {
+				witness: witness,
+				lateral: lat,
+			}),
 			pos: pos,
 		}))
 	}
-	pub fn null_sr(pos: FilePosition, num: usize, clause: ClauseContainer, latid: ClauseIndex, latclause: ClauseContainer, witness: WitnessContainer, issueid: ClauseIndex, issueclause: ClauseContainer, chain: ChainContainer) -> VerificationFailure {
-		VerificationFailure::NullChainSr(Box::<IncorrectChain>::new(IncorrectChain {
+	pub fn null_sr(pos: FilePosition, num: usize, clause: ClauseContainer, lat: Option<(ClauseIndex, ClauseContainer)>, witness: WitnessContainer, issueid: ClauseIndex, issueclause: ClauseContainer, chain: ChainContainer) -> VerificationFailure {
+		VerificationFailure::NullChainWsr(Box::<IncorrectChain>::new(IncorrectChain {
 			num: num,
 			clause: clause,
-			witness: Some(witness),
-			lateral: Some((latid, latclause)),
 			chain: chain,
-			issue: (issueid, Some(issueclause)),
+			issue: Some(issueid),
+			issue_clause: Some(issueclause),
+			lateral: Some(LateralInfo {
+				witness: witness,
+				lateral: lat,
+			}),
 			pos: pos,
 		}))
 	}
-	pub fn missing_sr(pos: FilePosition, num: usize, clause: ClauseContainer, latid: ClauseIndex, latclause: ClauseContainer, witness: WitnessContainer, issueid: ClauseIndex, chain: ChainContainer) -> VerificationFailure {
-		VerificationFailure::MissingChainSr(Box::<IncorrectChain>::new(IncorrectChain {
+	pub fn missing_sr(pos: FilePosition, num: usize, clause: ClauseContainer, lat: Option<(ClauseIndex, ClauseContainer)>, witness: WitnessContainer, issueid: ClauseIndex, chain: ChainContainer) -> VerificationFailure {
+		VerificationFailure::MissingChainWsr(Box::<IncorrectChain>::new(IncorrectChain {
 			num: num,
 			clause: clause,
-			witness: Some(witness),
-			lateral: Some((latid, latclause)),
 			chain: chain,
-			issue: (issueid, None),
+			issue: Some(issueid),
+			issue_clause: None,
+			lateral: Some(LateralInfo {
+				witness: witness,
+				lateral: lat,
+			}),
 			pos: pos,
 		}))
 	}
 	pub fn missing_lateral_sr(pos: FilePosition, num: usize, clause: ClauseContainer, latid: ClauseIndex, chain: RawChainContainer) -> VerificationFailure {
-		VerificationFailure::MissingLateralSr(Box::<MissingLateral>::new(MissingLateral {
+		VerificationFailure::MissingLateral(Box::<MissingLateral>::new(MissingLateral {
 			num: num,
 			clause: clause,
 			lateral: latid,
@@ -353,28 +344,11 @@ impl VerificationFailure {
 		}))
 	}
 	pub fn repeated_lateral_sr(pos: FilePosition, num: usize, clause: ClauseContainer, latid: ClauseIndex, latclause: ClauseContainer, chain1: RawChainContainer, chain2: RawChainContainer) -> VerificationFailure {
-		VerificationFailure::RepeatedLateralSr(Box::<RepeatedLateral>::new(RepeatedLateral {
+		VerificationFailure::RepeatedLateral(Box::<RepeatedLateral>::new(RepeatedLateral {
 			num: num,
 			clause: clause,
 			lateral: (latid, latclause),
 			chains: (chain1, chain2),
-			pos: pos,
-		}))
-	}
-	pub fn missing_suffix_sr(pos: FilePosition, num: usize, clause: ClauseContainer, witness: WitnessContainer, latid: ClauseIndex, latclause: ClauseContainer) -> VerificationFailure {
-		VerificationFailure::MissingSuffixSr(Box::<MissingSuffix>::new(MissingSuffix {
-			num: num,
-			clause: clause,
-			witness: witness,
-			lateral: (latid, latclause),
-			pos: pos,
-		}))
-	}
-	pub fn unsatisfied_sr(pos: FilePosition, num: usize, clause: ClauseContainer, witness: WitnessContainer) -> VerificationFailure {
-		VerificationFailure::UnsatisfiedSr(Box::<UnsatisfyingWitness>::new(UnsatisfyingWitness {
-			num: num,
-			clause: clause,
-			witness: witness,
 			pos: pos,
 		}))
 	}
@@ -394,11 +368,9 @@ impl VerificationFailure {
 			VerificationFailure::UnchainedRup(_) |
 			VerificationFailure::NullChainRup(_) |
 			VerificationFailure::MissingChainRup(_) |
-			VerificationFailure::UnchainedSr(_) |
-			VerificationFailure::NullChainSr(_) |
-			VerificationFailure::MissingChainSr(_) |
-			VerificationFailure::MissingSuffixSr(_) |
-			VerificationFailure::UnsatisfiedSr(_) |
+			VerificationFailure::UnchainedWsr(_) |
+			VerificationFailure::NullChainWsr(_) |
+			VerificationFailure::MissingChainWsr(_) |
 			VerificationFailure::Unrefuted(_) => true,
 			_ => false,
 		}
@@ -435,13 +407,11 @@ impl VerificationFailure {
 			VerificationFailure::UnchainedRup(_) |
 			VerificationFailure::NullChainRup(_) |
 			VerificationFailure::MissingChainRup(_) |
-			VerificationFailure::UnchainedSr(_) |
-			VerificationFailure::NullChainSr(_) |
-			VerificationFailure::MissingChainSr(_) |
-			VerificationFailure::MissingLateralSr(_) |
-			VerificationFailure::RepeatedLateralSr(_) |
-			VerificationFailure::MissingSuffixSr(_) |
-			VerificationFailure::UnsatisfiedSr(_) |
+			VerificationFailure::UnchainedWsr(_) |
+			VerificationFailure::NullChainWsr(_) |
+			VerificationFailure::MissingChainWsr(_) |
+			VerificationFailure::MissingLateral(_) |
+			VerificationFailure::RepeatedLateral(_) |
 			VerificationFailure::MissingDeletion(_) |
 			VerificationFailure::Unrefuted(_) => asrbin
 		}
@@ -482,15 +452,34 @@ impl Display for VerificationFailure {
 			VerificationFailure::ConflictInferenceId(bx) => write!(f, "Conflicting inferred clause identifier found in ASR file: {}:\nProof instruction {} has identifier {}, but that identifier is already in use for clause {}.", &bx.pos, &bx.num, &bx.id, &bx.clause),
 			VerificationFailure::IncorrectCore(bx) => write!(f, "Incorrect core entry in ASR file {}:\nCore entry {} introduces clause {}, but this clause does not occur in the CNF formula.", &bx.pos, &bx.num, &bx.clause),
 			VerificationFailure::UnchainedRup(bx) => write!(f, "Incorrect RUP inference in ASR file {}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}but propagation does not produce a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.chain),
-			VerificationFailure::NullChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.0, &bx.issue.1.as_ref().unwrap()),
-			VerificationFailure::MissingChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause identifier is {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.0),
-			VerificationFailure::UnchainedSr(bx) => write!(f, "Incorrect SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for clause {}: {}, but propagation does not produce a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.witness_lateral.as_ref().unwrap().0, &bx.chain, &bx.witness_lateral.as_ref().unwrap().1, &bx.witness_lateral.as_ref().unwrap().2),
-			VerificationFailure::NullChainSr(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for clause {}: {}. The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.witness.as_ref().unwrap(), &bx.chain, &bx.lateral.as_ref().unwrap().0, &bx.lateral.as_ref().unwrap().1, &bx.issue.0, &bx.issue.1.as_ref().unwrap()),
-			VerificationFailure::MissingChainSr(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for clause {}: {}. The next propagation clause identifier is {} but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.witness.as_ref().unwrap(), &bx.chain, &bx.lateral.as_ref().unwrap().0, &bx.lateral.as_ref().unwrap().1, &bx.issue.0),
-			VerificationFailure::MissingLateralSr(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference. The subchain {} is given for clause identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.lateral),
-			VerificationFailure::RepeatedLateralSr(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference. Two subchains {} and {} are given for the same clause identifier {}: {}.", &bx.pos, &bx.num, &bx.clause, &bx.chains.0, &bx.chains.1, &bx.lateral.0, &bx.lateral.1),
-			VerificationFailure::MissingSuffixSr(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mappin {}. The formula clause {}: {} needs a propagation chain, but none is given.", &bx.pos, &bx.num, &bx.clause, &bx.witness, &bx.lateral.0, &bx.lateral.1),
-			VerificationFailure::UnsatisfiedSr(bx) => write!(f, "Incorrect SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}, but the mapping does not satisfy this clause.", &bx.pos, &bx.num, &bx.clause, &bx.witness),
+			VerificationFailure::NullChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.as_ref().unwrap(), &bx.issue_clause.as_ref().unwrap()),
+			VerificationFailure::MissingChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause identifier is {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.as_ref().unwrap()),
+			VerificationFailure::UnchainedWsr(bx) => {
+				write!(f, "Incorrect SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
+				match &bx.lateral.as_ref().unwrap().lateral {
+					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
+					None => write!(f, " the clause itself")?,
+				}
+				write!(f, ", but propagation does not produce a contradiction.")
+			},
+			VerificationFailure::NullChainWsr(bx) => {
+				write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
+				match &bx.lateral.as_ref().unwrap().lateral {
+					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
+					None => write!(f, " the clause itself")?,
+				}
+				write!(f, ". The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.issue.as_ref().unwrap(), &bx.issue_clause.as_ref().unwrap())
+			},
+			VerificationFailure::MissingChainWsr(bx) => {
+				write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
+				match &bx.lateral.as_ref().unwrap().lateral {
+					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
+					None => write!(f, " the clause itself")?,
+				}
+				write!(f, ". The next propagation clause identifier is {} but no clause is associated to this identifier.", &bx.issue.as_ref().unwrap())
+			},
+			VerificationFailure::MissingLateral(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference. The subchain {} is given for clause identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.lateral),
+			VerificationFailure::RepeatedLateral(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference. Two subchains {} and {} are given for the same clause identifier {}: {}.", &bx.pos, &bx.num, &bx.clause, &bx.chains.0, &bx.chains.1, &bx.lateral.0, &bx.lateral.1),
 			VerificationFailure::MissingDeletion(bx) => write!(f, "Invalid deletion instruction in ASR file {}:\nProof instruction {} deletes the clause with identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.id),
 			VerificationFailure::Unrefuted(bx) => write!(f, "Invalid proof in ASR file {}:\nThe proof does not derive the empty clause at any point.", &**bx),
 		}
@@ -521,15 +510,34 @@ impl Binary for VerificationFailure {
 			VerificationFailure::ConflictInferenceId(bx) => write!(f, "Conflicting inferred clause identifier found in ASR file: {}:\nProof instruction {} has identifier {}, but that identifier is already in use for clause {}.", &bx.pos, &bx.num, &bx.id, &bx.clause),
 			VerificationFailure::IncorrectCore(bx) => write!(f, "Incorrect core entry in ASR file {:b}:\nCore entry {} introduces clause {}, but this clause does not occur in the CNF formula.", &bx.pos, &bx.num, &bx.clause),
 			VerificationFailure::UnchainedRup(bx) => write!(f, "Incorrect RUP inference in ASR file {:b}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}but propagation does not produce a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.chain),
-			VerificationFailure::NullChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {:b}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.0, &bx.issue.1.as_ref().unwrap()),
-			VerificationFailure::MissingChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {:b}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause identifier is {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.0),
-			VerificationFailure::UnchainedSr(bx) => write!(f, "Incorrect SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for clause {}: {}, but propagation does not produce a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.witness_lateral.as_ref().unwrap().0, &bx.chain, &bx.witness_lateral.as_ref().unwrap().1, &bx.witness_lateral.as_ref().unwrap().2),
-			VerificationFailure::NullChainSr(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for clause {}: {}. The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.witness.as_ref().unwrap(), &bx.chain, &bx.lateral.as_ref().unwrap().0, &bx.lateral.as_ref().unwrap().1, &bx.issue.0, &bx.issue.1.as_ref().unwrap()),
-			VerificationFailure::MissingChainSr(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for clause {}: {}. The next propagation clause identifier is {} but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.witness.as_ref().unwrap(), &bx.chain, &bx.lateral.as_ref().unwrap().0, &bx.lateral.as_ref().unwrap().1, &bx.issue.0),
-			VerificationFailure::MissingLateralSr(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference. The subchain {} is given for clause identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.lateral),
-			VerificationFailure::RepeatedLateralSr(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference. Two subchains {} and {} are given for the same clause identifier {}: {}.", &bx.pos, &bx.num, &bx.clause, &bx.chains.0, &bx.chains.1, &bx.lateral.0, &bx.lateral.1),
-			VerificationFailure::MissingSuffixSr(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mappin {}. The formula clause {}: {} needs a propagation chain, but none is given.", &bx.pos, &bx.num, &bx.clause, &bx.witness, &bx.lateral.0, &bx.lateral.1),
-			VerificationFailure::UnsatisfiedSr(bx) => write!(f, "Incorrect SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}, but the mapping does not satisfy this clause.", &bx.pos, &bx.num, &bx.clause, &bx.witness),
+			VerificationFailure::NullChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {:b}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.as_ref().unwrap(), &bx.issue_clause.as_ref().unwrap()),
+			VerificationFailure::MissingChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {:b}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause identifier is {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.as_ref().unwrap()),
+			VerificationFailure::UnchainedWsr(bx) => {
+				write!(f, "Incorrect SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
+				match &bx.lateral.as_ref().unwrap().lateral {
+					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
+					None => write!(f, " the clause itself")?,
+				}
+				write!(f, ", but propagation does not produce a contradiction.")
+			},
+			VerificationFailure::NullChainWsr(bx) => {
+				write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
+				match &bx.lateral.as_ref().unwrap().lateral {
+					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
+					None => write!(f, " the clause itself")?,
+				}
+				write!(f, ". The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.issue.as_ref().unwrap(), &bx.issue_clause.as_ref().unwrap())
+			},
+			VerificationFailure::MissingChainWsr(bx) => {
+				write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
+				match &bx.lateral.as_ref().unwrap().lateral {
+					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
+					None => write!(f, " the clause itself")?,
+				}
+				write!(f, ". The next propagation clause identifier is {} but no clause is associated to this identifier.", &bx.issue.as_ref().unwrap())
+			},
+			VerificationFailure::MissingLateral(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference. The subchain {} is given for clause identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.lateral),
+			VerificationFailure::RepeatedLateral(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference. Two subchains {} and {} are given for the same clause identifier {}: {}.", &bx.pos, &bx.num, &bx.clause, &bx.chains.0, &bx.chains.1, &bx.lateral.0, &bx.lateral.1),
 			VerificationFailure::MissingDeletion(bx) => write!(f, "Invalid deletion instruction in ASR file {:b}:\nProof instruction {} deletes the clause with identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.id),
 			VerificationFailure::Unrefuted(bx) => write!(f, "Invalid proof in ASR file {:b}:\nThe proof does not derive the empty clause at any point.", &**bx),
 		}

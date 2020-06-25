@@ -721,7 +721,7 @@ mod test {
         parser::{
             DimacsLexeme::{self, Header as DHeader, Number as DNumber, Letter as DLetter},
             VbeLexeme::{self, Header as VHeader, Number as VNumber},
-            ParsingError, DimacsParser, VbeParser,
+            ParsingError, DimacsParser, VbeParser, LexingError,
         },
 		input::{InputStream, CompressionFormat, FilePosition},
     };
@@ -757,7 +757,7 @@ mod test {
 
 	fn check_dimacs_lexer(path: &Path, check: &Vec<DimacsLexeme>, err: Option<ParsingError>) {
 		let is = InputStream::<'_>::open(path, CompressionFormat::Plain).expect("Could not open file");
-		let mut parser = DimacsParser::<'_, TestError>::new(is);
+		let mut parser = DimacsParser::<'_, TestError>::new(is, "CNF");
         let mut vec = Vec::<DimacsLexeme>::new();
         loop { match parser.next() {
             Ok(Some(x)) => vec.push(x),
@@ -787,7 +787,7 @@ mod test {
 
 	fn check_vbe_lexer(path: &Path, check: &Vec<VbeLexeme>, err: Option<ParsingError>) {
 		let is = InputStream::<'_>::open(path, CompressionFormat::Plain).expect("Could not open file");
-		let mut parser = VbeParser::<'_, TestError>::new(is);
+		let mut parser = VbeParser::<'_, TestError>::new(is, "CNF");
         let mut vec = Vec::<VbeLexeme>::new();
         loop { match parser.next() {
             Ok(Some(x)) => vec.push(x),
@@ -815,7 +815,14 @@ mod test {
 				_ => assert!(false),
 			}
 		}
-	}
+    }
+
+    fn lexing_error() -> Box<LexingError> {
+        Box::new(LexingError {
+            pos: FilePosition::new(Path::new("")),
+            format: "CNF".to_string(),
+        })
+    }
 
 	#[test]
 	fn test_dimacs_lexer() {
@@ -837,21 +844,21 @@ mod test {
 				DNumber(50i64), DNumber(80i64), DNumber(16i64), DNumber(17i64),
 				DNumber(30i64), DNumber(0i64), DNumber(-17i64), DNumber(22i64),
 				DNumber(30i64), DNumber(0i64)
-			], Some(ParsingError::InvalidNumber(Box::new(FilePosition::new(Path::new("")))))),
-			("test/dimacs_lexer/cnf2.txt", vec![], Some(ParsingError::InvalidHeader(Box::new(FilePosition::new(Path::new("")))))),
-			("test/dimacs_lexer/cnf3.txt", vec![], Some(ParsingError::OutOfRangeHeader(Box::new(FilePosition::new(Path::new("")))))),
+			], Some(ParsingError::InvalidNumber(lexing_error()))),
+			("test/dimacs_lexer/cnf2.txt", vec![], Some(ParsingError::InvalidHeader(lexing_error()))),
+			("test/dimacs_lexer/cnf3.txt", vec![], Some(ParsingError::OutOfRangeHeader(lexing_error()))),
 			("test/dimacs_lexer/cnf4.txt", vec![
 				DHeader([b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8]), DNumber(50i64), DNumber(9223372036854775807i64)
 			], None),
 			("test/dimacs_lexer/cnf5.txt", vec![
 				DHeader([b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8]), DNumber(50i64)
-			], Some(ParsingError::OutOfRangeI64(Box::new(FilePosition::new(Path::new("")))))),
+			], Some(ParsingError::OutOfRangeI64(lexing_error()))),
 			("test/dimacs_lexer/cnf6.txt", vec![
 				DHeader([b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8]), DNumber(50i64), DNumber(-9223372036854775808i64)
 			], None),
 			("test/dimacs_lexer/cnf7.txt", vec![
 				DHeader([b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8]), DNumber(50i64)
-			], Some(ParsingError::OutOfRangeI64(Box::new(FilePosition::new(Path::new("")))))),
+			], Some(ParsingError::OutOfRangeI64(lexing_error()))),
 			("test/dimacs_lexer/cnf8.txt", vec![
 				DHeader([b'l', b'e', b't', b't', b'e', b'r', b's', 0u8]),
 				DNumber(50i64), DNumber(80i64), DNumber(16i64), DNumber(17i64),
@@ -862,7 +869,7 @@ mod test {
 			("test/dimacs_lexer/cnf9.txt", vec![
 				DHeader([b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8]),
 				DNumber(50i64), DNumber(80i64)
-			], Some(ParsingError::InvalidLetter(Box::new(FilePosition::new(Path::new(""))))))
+			], Some(ParsingError::InvalidLetter(lexing_error())))
 		];
 		for (path, check, err) in tests {
 			check_dimacs_lexer(Path::new(path), &check, err)
@@ -884,11 +891,11 @@ mod test {
             ("test/vbe_lexer/vbe2.bin",
 				vec![VNumber(142848914u64), VNumber(85u64), VNumber(55u64), VNumber(104u64), VNumber(1u64), VNumber(36u64), VNumber(12595012903u64),
                 VNumber(10279u64), VNumber(19u64), VNumber(67u64), VNumber(62028944u64), VNumber(113u64), VNumber(86u64), VNumber(37u64), VNumber(29888669399u64)],
-				Some(ParsingError::OutOfRangeU64(Box::new(FilePosition::new(Path::new("")))))),
+				Some(ParsingError::OutOfRangeU64(lexing_error()))),
 			("test/vbe_lexer/vbe3.bin",
                 vec![VNumber(142848914u64), VNumber(85u64), VNumber(55u64), VNumber(104u64), VNumber(1u64), VNumber(36u64), VNumber(12595012903u64),
                 VNumber(10279u64), VNumber(19u64), VNumber(67u64), VNumber(62028944u64), VNumber(113u64), VNumber(86u64), VNumber(37u64), VNumber(29888669399u64)],
-				Some(ParsingError::InvalidVbeNumber(Box::new(FilePosition::new(Path::new("")))))),
+				Some(ParsingError::InvalidVbeNumber(lexing_error()))),
 			("test/vbe_lexer/vbe4.bin",
                 vec![VNumber(142848914u64), VNumber(85u64), VNumber(55u64), VNumber(104u64), VNumber(1u64), VNumber(36u64), VNumber(12595012903u64),
                 VNumber(10279u64), VNumber(19u64), VNumber(67u64), VNumber(62028944u64), VNumber(113u64), VNumber(86u64), VNumber(37u64), VNumber(29888669399u64),
@@ -900,7 +907,7 @@ mod test {
             ("test/vbe_lexer/vbe6.bin",
                 vec![VNumber(142848914u64), VNumber(85u64), VNumber(55u64), VNumber(104u64), VNumber(1u64), VNumber(36u64), VNumber(12595012903u64),
                 VNumber(10279u64), VNumber(19u64), VNumber(67u64), VNumber(62028944u64), VNumber(113u64), VNumber(86u64), VNumber(37u64), VNumber(29888669399u64)],
-                Some(ParsingError::InvalidVbeHeader(Box::new(FilePosition::new(Path::new("")))))),
+                Some(ParsingError::InvalidVbeHeader(lexing_error()))),
 		];
 		for (path, check, err) in tests {
 			check_vbe_lexer(Path::new(path), &check, err)

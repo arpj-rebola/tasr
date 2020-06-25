@@ -1,9 +1,9 @@
 use std::{
-	convert::{TryFrom},
 	fmt::{self, Debug, Formatter},
 };
 
 use crate::{
+	bst::{BinarySearchTree},
 	clausedb::{WitnessContainer},
 	variable::{Literal, Variable},
 };
@@ -176,7 +176,7 @@ impl BacktrackBlock {
 		}
 		self.lits.truncate(n);
 	}
-	pub fn length(&self) -> usize {
+	pub fn level(&self) -> usize {
 		self.lits.len()
 	}
 	pub fn clear(&mut self) {
@@ -188,87 +188,127 @@ impl BacktrackBlock {
 }
 
 pub struct Substitution {
-	vec: Vec<Literal>,
+	bst: BinarySearchTree<Variable, Literal>,
 }
 impl Substitution {
 	pub fn new() -> Substitution {
-		Substitution { vec: Vec::<Literal>::new() }
+		Substitution { bst: BinarySearchTree::<Variable, Literal>::new() }
+	}
+	pub fn explicit_map(&self, lit: Literal) -> Option<Literal> {
+		let (var, pol) = lit.split()?;
+		let l = self.bst.get(&var)?;
+		Some(if pol {
+			*l
+		} else {
+			l.complement()
+		})
 	}
 	pub fn map(&self, lit: Literal) -> Literal {
-		match lit.split() {
-			Some((var, pol)) => match self.vec.get(var.index()) {
-				Some(l) => if pol {
-					*l
-				} else {
-					l.complement()
-				},
-				None => lit,
-			},
-			None => lit,
-		}
+		self.explicit_map(lit).unwrap_or(lit)
 	}
 	pub fn set(&mut self, var: Variable, lit: Literal) -> InsertionTest {
-		let index = var.index();
-		if index >= self.vec.len() {
-			let size = usize::min(Variable::MaxIndex + 1usize, (index << 1) + 1usize);
-			let mut new = Variable::try_from((self.vec.len() + 1usize) as i64).unwrap();
-			self.vec.resize_with(size, || { let v = new; new = new.next() ; v.positive() });
-		}
-		let mt = unsafe { self.vec.get_unchecked_mut(var.index()) };
-		if *mt == var.positive() && lit != *mt {
-			*mt = lit;
-			InsertionTest::Alright
-		} else if lit == *mt {
-			InsertionTest::Repeated
-		} else {
-			InsertionTest::Conflict
+		match self.bst.insert(var, lit) {
+			Some(()) => InsertionTest::Alright,
+			None => {
+				if self.bst.get(&var).unwrap() == &lit {
+					InsertionTest::Repeated
+				} else {
+					InsertionTest::Conflict
+				}
+			}
 		}
 	}
-	pub fn clear(&mut self, var: Variable) {
-		match self.vec.get_mut(var.index()) {
-			Some(mt) => *mt = var.positive(),
-			None => (),
-		}
+	pub fn clear(&mut self) {
+		self.bst.clear()
+	}
+	pub fn extract(&self) -> WitnessContainer {
+		let vec = self.bst.iter().map(|(k, v)| (*k, *v)).collect();
+		WitnessContainer(vec)
 	}
 }
 
-pub struct SubstitutionStack {
-	subst: Substitution,
-	vars: Vec<Variable>,
-}
-impl SubstitutionStack {
-	pub fn new() -> SubstitutionStack {
-		SubstitutionStack {
-			subst: Substitution::new(),
-			vars: Vec::<Variable>::new(),
-		}
-	}
-	pub fn map(&self, lit: Literal) -> Literal {
-		self.subst.map(lit)
-	}
-	pub fn set(&mut self, var: Variable, lit: Literal) -> InsertionTest {
-		let test = self.subst.set(var, lit);
-		match test {
-			InsertionTest::Alright => self.vars.push(var),
-			_ => (),
-		}
-		test
-	}
-	pub fn clear(&mut self) {
-		for var in &self.vars {
-			self.subst.clear(*var);
-		}
-		self.vars.clear();
-	}
-	pub fn extract(&self) -> WitnessContainer {
-		let mut out = Vec::<(Variable, Literal)>::new();
-		for var in &self.vars {
-			let lit = self.map(var.positive());
-			out.push((*var, lit));
-		}
-		WitnessContainer(out)
-	}
-}
+// pub struct Substitution {
+// 	vec: Vec<Literal>,
+// }
+// impl Substitution {
+// 	pub fn new() -> Substitution {
+// 		Substitution { vec: Vec::<Literal>::new() }
+// 	}
+// 	pub fn map(&self, lit: Literal) -> Literal {
+// 		match lit.split() {
+// 			Some((var, pol)) => match self.vec.get(var.index()) {
+// 				Some(l) => if pol {
+// 					*l
+// 				} else {
+// 					l.complement()
+// 				},
+// 				None => lit,
+// 			},
+// 			None => lit,
+// 		}
+// 	}
+// 	pub fn set(&mut self, var: Variable, lit: Literal) -> InsertionTest {
+// 		let index = var.index();
+// 		if index >= self.vec.len() {
+// 			let size = usize::min(Variable::MaxIndex + 1usize, (index << 1) + 1usize);
+// 			let mut new = Variable::try_from((self.vec.len() + 1usize) as i64).unwrap();
+// 			self.vec.resize_with(size, || { let v = new; new = new.next() ; v.positive() });
+// 		}
+// 		let mt = unsafe { self.vec.get_unchecked_mut(var.index()) };
+// 		if *mt == var.positive() && lit != *mt {
+// 			*mt = lit;
+// 			InsertionTest::Alright
+// 		} else if lit == *mt {
+// 			InsertionTest::Repeated
+// 		} else {
+// 			InsertionTest::Conflict
+// 		}
+// 	}
+// 	pub fn clear(&mut self, var: Variable) {
+// 		match self.vec.get_mut(var.index()) {
+// 			Some(mt) => *mt = var.positive(),
+// 			None => (),
+// 		}
+// 	}
+// }
+
+// pub struct SubstitutionStack {
+// 	subst: Substitution,
+// 	vars: Vec<Variable>,
+// }
+// impl SubstitutionStack {
+// 	pub fn new() -> SubstitutionStack {
+// 		SubstitutionStack {
+// 			subst: Substitution::new(),
+// 			vars: Vec::<Variable>::new(),
+// 		}
+// 	}
+// 	pub fn map(&self, lit: Literal) -> Literal {
+// 		self.subst.map(lit)
+// 	}
+// 	pub fn set(&mut self, var: Variable, lit: Literal) -> InsertionTest {
+// 		let test = self.subst.set(var, lit);
+// 		match test {
+// 			InsertionTest::Alright => self.vars.push(var),
+// 			_ => (),
+// 		}
+// 		test
+// 	}
+// 	pub fn clear(&mut self) {
+// 		for var in &self.vars {
+// 			self.subst.clear(*var);
+// 		}
+// 		self.vars.clear();
+// 	}
+// 	pub fn extract(&self) -> WitnessContainer {
+// 		let mut out = Vec::<(Variable, Literal)>::new();
+// 		for var in &self.vars {
+// 			let lit = self.map(var.positive());
+// 			out.push((*var, lit));
+// 		}
+// 		WitnessContainer(out)
+// 	}
+// }
 
 #[cfg(test)]
 mod test {

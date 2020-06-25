@@ -1,4 +1,5 @@
 use std::{
+	cmp::{Ordering},
 	convert::{TryFrom},
 	fmt::{self, Debug, Formatter, Display},
 	iter::{Enumerate},
@@ -79,7 +80,7 @@ impl Display for WitnessContainer {
 	}
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd)]
 #[repr(transparent)]
 pub struct ClauseIndex {
 	val: u32,
@@ -140,6 +141,11 @@ impl Debug for ClauseIndex {
 impl Display for ClauseIndex {
 	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
 		write!(f, "#{}", self.index())
+	}
+}
+impl Ord for ClauseIndex {
+	fn cmp(&self, other: &Self) -> Ordering {
+		self.val.cmp(&other.val)
 	}
 }
 

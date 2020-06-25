@@ -1,6 +1,6 @@
 [package]
 name = "tasr"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Adrian Rebola-Pardo <arpj.rebola@gmail.com>"]
 edition = "2018"
 description = "ASR proof checker for SAT solving"

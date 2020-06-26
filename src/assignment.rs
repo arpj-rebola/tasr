@@ -234,7 +234,7 @@ mod test {
 	};
 	use rand::{self, Rng};
 	use crate::{
-		assignment::{Block, InsertionTest, BacktrackBlock},
+		assignment::{Block, InsertionTest, BacktrackBlock, Substitution},
 		variable::{Variable, Literal},
 	};
 
@@ -332,6 +332,69 @@ mod test {
 					assert!(stack_neg == array_neg);
 				}
 			}
+		}
+	}
+
+	#[test]
+	fn test_substitution() {
+		let mut rng = rand::thread_rng();
+		let minvar = Variable::try_from(1i64).unwrap();
+		let maxvar = Variable::try_from(500i64).unwrap();
+		let mut subst = Substitution::new();
+		for _ in 0usize..100usize {
+			let mut vec = Vec::<(Variable, Literal)>::new();
+			for _ in 0usize..100usize {
+				let var = Variable::random(&mut rng, minvar, maxvar);
+				let lit = Literal::random(&mut rng, None, maxvar);
+				if let InsertionTest::Alright = subst.set(var, lit) {
+					vec.push((var, lit));
+				}
+			}
+			let ext = subst.extract().0;
+			assert!(subst.map(Literal::Top) == Literal::Top);
+			assert!(subst.map(Literal::Bottom) == Literal::Bottom);
+			for i in 1i64..501i64 {
+				let var = Variable::try_from(i).unwrap();
+				match subst.explicit_map(var.positive()) {
+					Some(lit) => {
+						assert!(subst.map(var.positive()) == lit);
+						assert!(subst.map(var.negative()) == lit.complement());
+						let mut found_vec = false;
+						for pair in &vec {
+							if &(var, lit) == pair {
+								found_vec = true;
+							}
+						}
+						let mut found_ext = false;
+						for pair in &ext {
+							if &(var, lit) == pair {
+								found_ext = true;
+							}
+						}
+						assert!(found_vec);
+						assert!(found_ext);
+					},
+					None => {
+						assert!(subst.map(var.positive()) == var.positive());
+						assert!(subst.map(var.negative()) == var.negative());
+						let mut found_vec = false;
+						for (v, _) in &vec {
+							if &var == v {
+								found_vec = true;
+							}
+						}
+						let mut found_ext = false;
+						for (v, _) in &ext {
+							if &var == v {
+								found_ext = true;
+							}
+						}
+						assert!(!found_vec);
+						assert!(!found_ext);
+					},
+				}
+			}
+			subst.clear();
 		}
 	}
 

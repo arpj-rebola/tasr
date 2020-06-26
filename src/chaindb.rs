@@ -1,6 +1,6 @@
 use std::{
     convert::{TryFrom},
-    mem::{self},
+    mem::{self, ManuallyDrop},
 };
 
 use crate::{
@@ -64,10 +64,77 @@ impl<'a> ChainDbWriter<'a> {
         let len = u32::try_from(self.db.vec.len() - self.origin - 1usize).expect("ChainDb record length exceeded.");
         unsafe { *self.db.vec.get_unchecked_mut(self.origin) = len; }
         self.db.index.insert(self.id, self.origin);
+        ManuallyDrop::<ChainDbWriter<'a>>::new(self);
     }
 }
 impl<'a> Drop for ChainDbWriter<'a> {
     fn drop(&mut self) {
         self.db.vec.truncate(self.origin);
     }
+}
+
+#[cfg(test)]
+mod test {
+    use std::{
+        convert::{TryFrom},
+    };
+	use rand::{self, Rng};
+	use crate::{
+        clausedb::{ClauseIndex},
+		chaindb::{ChainDb},
+    };
+    
+    #[test]
+    fn test_chain_database() {
+        let mut rng = rand::thread_rng();
+        let mut chain = ChainDb::new();
+        for _ in 0..100usize {
+            let mut vec = Vec::<(ClauseIndex, Vec<ClauseIndex>)>::new();
+            let size = rng.gen_range(0usize, 1000usize);
+            for _ in 0..size {
+                let index = ClauseIndex::try_from(rng.gen_range(1i64, 1000i64)).unwrap();
+                let length = rng.gen_range(0usize, 100usize);
+                match chain.open(index) {
+                    Some(mut chw) => {
+                        let mut found = false;
+                        for (id, _) in &vec {
+                            if id == &index {
+                                found = true;
+                            }
+                        }
+                        assert!(!found);
+                        let mut record = Vec::<ClauseIndex>::new();
+                        for _ in 0..length {
+                            let id = ClauseIndex::try_from(rng.gen_range(1i64, 1000i64)).unwrap();
+                            chw.write(id);
+                            record.push(id);
+                        }
+                        chw.close();
+                        vec.push((index, record));
+                    },
+                    None => {
+                        let mut found = false;
+                        for (id, _) in &vec {
+                            if id == &index {
+                                found = true;
+                            }
+                        }
+                        assert!(found);
+                    },
+                }
+            }
+            for (index, record) in &vec {
+                let chn = chain.retrieve(*index).unwrap();
+                let mut it1 = chn.iter();
+                let mut it2 = record.iter();
+                loop { match (it1.next(), it2.next()) {
+                    (Some(x), Some(y)) => assert!(x == y),
+                    (None, None) => break,
+                    _ => assert!(false),
+                } }
+            }
+            chain.clear();
+        }
+    }
+
 }

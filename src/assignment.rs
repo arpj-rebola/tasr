@@ -227,89 +227,6 @@ impl Substitution {
 	}
 }
 
-// pub struct Substitution {
-// 	vec: Vec<Literal>,
-// }
-// impl Substitution {
-// 	pub fn new() -> Substitution {
-// 		Substitution { vec: Vec::<Literal>::new() }
-// 	}
-// 	pub fn map(&self, lit: Literal) -> Literal {
-// 		match lit.split() {
-// 			Some((var, pol)) => match self.vec.get(var.index()) {
-// 				Some(l) => if pol {
-// 					*l
-// 				} else {
-// 					l.complement()
-// 				},
-// 				None => lit,
-// 			},
-// 			None => lit,
-// 		}
-// 	}
-// 	pub fn set(&mut self, var: Variable, lit: Literal) -> InsertionTest {
-// 		let index = var.index();
-// 		if index >= self.vec.len() {
-// 			let size = usize::min(Variable::MaxIndex + 1usize, (index << 1) + 1usize);
-// 			let mut new = Variable::try_from((self.vec.len() + 1usize) as i64).unwrap();
-// 			self.vec.resize_with(size, || { let v = new; new = new.next() ; v.positive() });
-// 		}
-// 		let mt = unsafe { self.vec.get_unchecked_mut(var.index()) };
-// 		if *mt == var.positive() && lit != *mt {
-// 			*mt = lit;
-// 			InsertionTest::Alright
-// 		} else if lit == *mt {
-// 			InsertionTest::Repeated
-// 		} else {
-// 			InsertionTest::Conflict
-// 		}
-// 	}
-// 	pub fn clear(&mut self, var: Variable) {
-// 		match self.vec.get_mut(var.index()) {
-// 			Some(mt) => *mt = var.positive(),
-// 			None => (),
-// 		}
-// 	}
-// }
-
-// pub struct SubstitutionStack {
-// 	subst: Substitution,
-// 	vars: Vec<Variable>,
-// }
-// impl SubstitutionStack {
-// 	pub fn new() -> SubstitutionStack {
-// 		SubstitutionStack {
-// 			subst: Substitution::new(),
-// 			vars: Vec::<Variable>::new(),
-// 		}
-// 	}
-// 	pub fn map(&self, lit: Literal) -> Literal {
-// 		self.subst.map(lit)
-// 	}
-// 	pub fn set(&mut self, var: Variable, lit: Literal) -> InsertionTest {
-// 		let test = self.subst.set(var, lit);
-// 		match test {
-// 			InsertionTest::Alright => self.vars.push(var),
-// 			_ => (),
-// 		}
-// 		test
-// 	}
-// 	pub fn clear(&mut self) {
-// 		for var in &self.vars {
-// 			self.subst.clear(*var);
-// 		}
-// 		self.vars.clear();
-// 	}
-// 	pub fn extract(&self) -> WitnessContainer {
-// 		let mut out = Vec::<(Variable, Literal)>::new();
-// 		for var in &self.vars {
-// 			let lit = self.map(var.positive());
-// 			out.push((*var, lit));
-// 		}
-// 		WitnessContainer(out)
-// 	}
-// }
-
 #[cfg(test)]
 mod test {
 	use std::{
@@ -317,7 +234,7 @@ mod test {
 	};
 	use rand::{self, Rng};
 	use crate::{
-		assignment::{Block, InsertionTest},
+		assignment::{Block, InsertionTest, BacktrackBlock},
 		variable::{Variable, Literal},
 	};
 
@@ -378,6 +295,44 @@ mod test {
 			vec.push(op);
 		}
 		check_block(&vec);
+	}
+
+	#[test]
+	fn test_backtrack_block() {
+		let mut rng = rand::thread_rng();
+		let minvar = Variable::try_from(1i64).unwrap();
+		let maxvar = Variable::try_from(500i64).unwrap();
+		let mut block = BacktrackBlock::new();
+		for i in 0usize..100000usize {
+			let dir: u8 = rng.gen();
+			if dir < 30u8 {
+				let maxlevel = block.level();
+				let newlevel = rng.gen_range(0usize, maxlevel + 1usize);
+				block.backtrack(newlevel);
+			} else {
+				let lit = Literal::random(&mut rng, Some(minvar), maxvar);
+				block.set(lit);
+			}
+			if i % 1000usize == 0usize {
+				for j in 1i64..501i64 {
+					let lit = Literal::try_from(j).unwrap();
+					let array_pos = block.check(lit);
+					let array_neg = block.check(lit.complement());
+					let mut stack_pos = false;
+					let mut stack_neg = false;
+					for lit0 in &block.lits {
+						if lit0 == &lit {
+							stack_pos = true;
+						}
+						if lit0 == &lit.complement() {
+							stack_neg = true;
+						}
+					}
+					assert!(stack_pos == array_pos);
+					assert!(stack_neg == array_neg);
+				}
+			}
+		}
 	}
 
 }

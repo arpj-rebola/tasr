@@ -1,20 +1,31 @@
 use std::{
 	fmt::{self, Formatter, Display},
-	io::{Stdin},
-	mem::{self},
-	path::{PathBuf},
+	time::{Instant},
+};
+
+use colored::{
+	Colorize,
 };
 
 use crate::{
-	assignment::{Block, InsertionTest, BacktrackBlock, Substitution},
+	assignment::{InsertionTest, BacktrackBlock, Substitution},
+	basic::{CnfHeaderStats, WitnessContainer, ClauseIndex},
 	chaindb::{ChainDb},
-	clausedb::{ClauseDb, ClauseIndex, ClauseSet, ClauseDbMeta, ClauseContainer, RawChainContainer, WitnessContainer},
-	input::{CompressionFormat, InputStream},
-	parser::{AsrParser, DimacsParser, VbeParser, AsrInstructionKind, CnfHeaderStats},
-	results::{VerificationResult, VerificationFailure},
-	unitpropagation::{UnitPropagator, PropagationResult, PropagationError},
-	variable::{Variable, Literal, MaybeVariable},
+	clausedb::{ClauseDb, ClauseSet, ClauseDbMeta},
+	input::{Positioned, StreamPosition},
+	parser::{AsrParser, AsrInstructionKind},
+	results::{VerificationFailure, ErrorStorage, ClauseIssuesBuilder, ClauseIssues, ChainIssuesBuilder, PropagationIssues, WitnessIssuesBuilder, WitnessIssues},
+	unitpropagation::{UnitPropagator},
+	variable::{MaybeVariable},
+	logger::{Logger, LoggerId},
 };
+
+#[derive(Debug, Copy, Clone)]
+pub enum Trimming {
+    Nothing,
+    Cleanup,
+    Trimming,
+}
 
 pub struct CheckerStats {
 	pub max_variable: MaybeVariable,
@@ -22,38 +33,74 @@ pub struct CheckerStats {
 	pub num_premises: usize,
 	pub num_cores: usize,
 	pub num_rups: usize,
-	pub num_srs: usize,
-	pub num_atomic_dels: usize,
-	pub num_del_instructions: usize
+	pub num_wsrs: usize,
+	pub num_deletions: usize,
+	pub num_dels: usize,
+	pub num_contradictions: usize,
+	pub errors: ErrorStorage,
+	pub time_start: Instant,
+	pub time_core: Instant,
+	pub time_derivation: Instant,
+	pub time_trimming: Instant,
 }
 impl CheckerStats {
-	fn new() -> CheckerStats {
+	fn new(permissive: bool) -> CheckerStats {
+		let now = Instant::now();
 		CheckerStats {
 			max_variable: MaybeVariable::None,
 			max_index: None,
 			num_premises: 0usize,
 			num_cores: 0usize,
 			num_rups: 0usize,
-			num_srs: 0usize,
-			num_atomic_dels: 0usize,
-			num_del_instructions: 0usize,
+			num_wsrs: 0usize,
+			num_deletions: 0usize,
+			num_dels: 0usize,
+			num_contradictions: 0usize,
+			errors: ErrorStorage::new(permissive),
+			time_start: now,
+			time_core: now,
+			time_derivation: now,
+			time_trimming: now,
 		}
 	}
 	fn num_proof_instructions(&self) -> usize {
-		self.num_rups + self.num_srs + self.num_del_instructions
+		self.num_rups + self.num_wsrs + self.num_dels
+	}
+	fn set_time_core(&mut self) {
+		let now = Instant::now();
+		self.time_core = now;
+		self.time_derivation = now;
+		self.time_trimming = now;
+	}
+	fn set_time_derivation(&mut self) {
+		let now = Instant::now();
+		self.time_derivation = now;
+		self.time_trimming = now;
+	}
+	fn set_time_trimming(&mut self) {
+		let now = Instant::now();
+		self.time_trimming = now;
 	}
 }
 impl Display for CheckerStats {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-		writeln!(f, "s {:<18} {}", "maximum variable", self.max_variable)?;
-		writeln!(f, "s {:<18} {}", "maximum id", self.max_index.map(|x| x.index()).unwrap_or(0usize))?;
-		writeln!(f, "s {:<18} {}", "premise clauses", self.num_premises)?;
-		writeln!(f, "s {:<18} {}", "core clauses", self.num_cores)?;
-		writeln!(f, "s {:<18} {}", "RUP inferences", self.num_rups)?;
-		writeln!(f, "s {:<18} {}", "SR inferences", self.num_srs)?;
-		writeln!(f, "s {:<18} {}", "deletion instructions", self.num_del_instructions)?;
-		writeln!(f, "s {:<18} {}", "clause deletions", self.num_atomic_dels)?;
-		writeln!(f, "s {:<18} {}", "total instructions", self.num_proof_instructions())?;
+		let (warnings, errors) = self.errors.count();
+		write!(f, "{:<30} {}\n", "warnings".bold(), warnings)?;
+		write!(f, "{:<30} {}\n", "errors".bold(), errors)?;
+		write!(f, "{:<30} {}\n", "maximum variable".bold(), self.max_variable)?;
+		write!(f, "{:<30} {}\n", "maximum clause identifier".bold(), self.max_index.map(|x| x.index()).unwrap_or(0usize))?;
+		write!(f, "{:<30} {}\n", "premise clauses".bold(), self.num_premises)?;
+		write!(f, "{:<30} {}\n", "core clauses".bold(), self.num_cores)?;
+		write!(f, "{:<30} {}\n", "RUP inferences".bold(), self.num_rups)?;
+		write!(f, "{:<30} {}\n", "WSR inferences".bold(), self.num_wsrs)?;
+		write!(f, "{:<30} {}\n", "deletion instructions".bold(), self.num_dels)?;
+		write!(f, "{:<30} {}\n", "deleted clauses".bold(), self.num_deletions)?;
+		write!(f, "{:<30} {}\n", "total instructions".bold(), self.num_proof_instructions())?;
+		write!(f, "{:<30} {}\n", "final contradictions".bold(), self.num_contradictions)?;
+		write!(f, "{:<30} {}s\n", "core checking runtime".bold(), self.time_core.duration_since(self.time_start).as_secs())?;
+		write!(f, "{:<30} {}s\n", "proof checking runtime".bold(), self.time_derivation.duration_since(self.time_core).as_secs())?;
+		write!(f, "{:<30} {}s\n", "trimming runtime".bold(), self.time_trimming.duration_since(self.time_derivation).as_secs())?;
+		write!(f, "{:<30} {}s\n", "total runtime".bold(), self.time_trimming.duration_since(self.time_start).as_secs())?;
 		Ok(())
     }
 }
@@ -63,482 +110,588 @@ pub struct CheckerConfig {
 	pub check_core: bool,
 	pub check_derivation: bool,
 	pub check_refutation: bool,
+	pub core_limit: usize,
+	pub proof_limit: usize,
 	pub permissive: bool,
+	pub trimming: Trimming,
+	pub output: LoggerId,
 }
 
-pub struct CheckerInputConfig {
-	pub path: Option<PathBuf>,
-	pub compression: CompressionFormat,
-	pub binary: bool,
-}
-
-pub struct AsrChecker<'a> {
-	cnf: Box<dyn 'a + AsrParser<VerificationFailure>>,
-	asr: Box<dyn 'a + AsrParser<VerificationFailure>>,
+pub struct AsrChecker<'a, 'b: 'a> {
+	cnf: &'a mut dyn AsrParser,
+	asr: &'a mut dyn AsrParser,
+	config: CheckerConfig,
+	logger: &'a mut Logger<'b>,
 	db: ClauseDb,
 	stats: CheckerStats,
-	config: CheckerConfig,
 }
-impl<'a> AsrChecker<'a> {
+impl<'a, 'b: 'a> AsrChecker<'a, 'b> {
 	const CnfHeader: [u8; 8] = [b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8];
 	const CoreHeader: [u8; 8] = [b'c', b'o', b'r', b'e', 0u8, 0u8, 0u8, 0u8];
 	const ProofHeader: [u8; 8] = [b'p', b'r', b'o', b'o', b'f', 0u8, 0u8, 0u8];
-	pub fn process<'b: 'a>(cnf: CheckerInputConfig, asr: CheckerInputConfig, stdin: &'b Stdin, config: CheckerConfig) -> CheckingResult {
-		match AsrChecker::<'a>::new(cnf, asr, stdin, config) {
-			Ok(mut checker) => {
-				let res = checker.check();
-				CheckingResult {
-					result: res,
-					stats: checker.stats,
-				}
-			},
-			Err(err) => {
-				CheckingResult {
-					result: Err(err),
-					stats: CheckerStats::new(),
-				}
-			}
-		}
-	}
-	fn new<'b: 'a>(cnf: CheckerInputConfig, asr: CheckerInputConfig, stdin: &'b Stdin, config: CheckerConfig) -> VerificationResult<AsrChecker<'a>> {
-		let cnf_input = match &cnf.path {
-			Some(path) => InputStream::<'a, VerificationFailure>::open(&path, cnf.compression)?,
-			None => InputStream::<'a, VerificationFailure>::string("p cnf 0 0", "(dummy)"),
-		};
-		let asr_input = match &asr.path {
-			Some(path) => InputStream::<'a, VerificationFailure>::open(&path, asr.compression)?,
-			None => InputStream::<'a, VerificationFailure>::stdin(stdin),
-		};
-		let cnf: Box<dyn 'a + AsrParser<VerificationFailure>> = if cnf.binary {
-			Box::new(DimacsParser::<'a, VerificationFailure>::new(cnf_input, "CNF"))
-		} else {
-			Box::new(VbeParser::<'a, VerificationFailure>::new(cnf_input, "CNF"))
-		};
-		let asr: Box<dyn 'a + AsrParser<VerificationFailure>> = if asr.binary {
-			Box::new(DimacsParser::<'a, VerificationFailure>::new(asr_input, "ASR"))
-		} else {
-			Box::new(VbeParser::<'a, VerificationFailure>::new(asr_input, "ASR"))
-		};
-		Ok(AsrChecker {
+	pub fn new<'d: 'a, 'e: 'a, 'f: 'a>(
+		cnf: &'d mut dyn AsrParser,
+		asr: &'e mut dyn AsrParser,
+		logger: &'f mut Logger<'b>,
+		config: CheckerConfig,
+	) -> AsrChecker<'a, 'b> {
+		let permissive = config.permissive;
+		AsrChecker::<'a, 'b> {
 			cnf: cnf,
 			asr: asr,
-			db: ClauseDb::new(),
-			stats: CheckerStats::new(),
 			config: config,
-		})
+			logger: logger,
+			db: ClauseDb::new(),
+			stats: CheckerStats::new(permissive),
+		}
 	}
-	pub fn check(&mut self) -> VerificationResult<()> {
+	pub fn check(mut self) -> CheckerStats {
 		let mut block = BacktrackBlock::new();
 		{
 			let mut set = ClauseSet::new();
-			if self.config.check_core {
-				self.check_cnf(&mut set, &mut block)?;
+			{
+				let premise_checker = AsrPremiseChecker::<'_, '_> {
+					cnf: &mut *self.cnf,
+					config: &mut self.config,
+					logger: &mut *self.logger,
+					set: &mut set,
+					block: &mut block,
+					stats: &mut self.stats,
+				};
+				premise_checker.check();
 			}
-			self.check_core(&mut set, &mut block)?;
-		}
-		self.check_proof(&mut block)?;
-		Ok(())
-	}
-	fn check_cnf(&mut self, set: &mut ClauseSet, block: &mut BacktrackBlock) -> VerificationResult<()> {
-		let mut hdfound = false;
-		while let Some(hd) = self.cnf.skip_to_header()? {
-			if &hd == &Self::CnfHeader {
-				if !hdfound {
-					hdfound = true;
-					self.check_cnf_formula(set, block)?;					
-				} else {
-					self.error_duplicated_cnf_section()?
-				}
-			}
-		}
-		if !hdfound {
-			self.error_missing_cnf_section()?
-		}
-		Ok(())
-	}
-	fn check_core(&mut self, set: &mut ClauseSet, block: &mut BacktrackBlock) -> VerificationResult<()> {
-		let mut hdfound = false;
-		while let Some(hd) = self.asr.skip_to_header()? {
-			if &hd == &Self::CoreHeader {
-				hdfound = true;
-				self.check_asr_core(set, block)?;
-				break;
+			{
+				let core_checker = AsrCoreChecker::<'_, '_> {
+					asr: &mut *self.asr,
+					config: &mut self.config,
+					logger: &mut *self.logger,
+					db: &mut self.db,
+					set: &mut set,
+					block: &mut block,
+					stats: &mut self.stats,
+				};
+				core_checker.check();
 			}
 		}
-		if !hdfound {
-			self.error_missing_core_section()?
+		self.stats.set_time_core();
+		{
+			let proof_checker = AsrProofChecker::<'_, '_> {
+				asr: &mut *self.asr,
+				config: &mut self.config,
+				logger: &mut *self.logger,
+				db: &mut self.db,
+				block: &mut block,
+				stats: &mut self.stats,
+				chain: ChainDb::new(),
+				subst: Substitution::new(),
+			};
+			proof_checker.check();
 		}
-		Ok(())
-	}
-	fn check_proof(&mut self, block: &mut BacktrackBlock) -> VerificationResult<()> {
-		let mut hdfound = false;
-		while let Some(hd) = self.asr.skip_to_header()? {
-			if &hd == &Self::ProofHeader {
-				if !hdfound {
-					hdfound = true;
-					if self.config.check_derivation || self.config.check_refutation {
-						self.check_asr_proof(block)?;
-					}
-				} else {
-					self.error_duplicated_proof_section()?
-				}
-			} else if &hd == &Self::CoreHeader {
-				self.error_duplicated_core_section()?
-			}
-		}
-		if !hdfound {
-			self.error_missing_proof_section()?
-		}
-		Ok(())
-	}
-	fn check_cnf_formula(&mut self, set: &mut ClauseSet, block: &mut BacktrackBlock) -> VerificationResult<()> {
-		let hdstats = self.cnf.parse_cnf_header()?;
-		while let Some(()) = self.cnf.parse_formula()? {
-			self.stats.num_premises += 1usize;
-			self.parse_set_clause(set, block)?;
-		}
-		if self.stats.max_variable > hdstats.variables {
-			self.error_incorrect_num_variables(&hdstats)?
-		} else if self.stats.num_premises != hdstats.clauses {
-			self.error_incorrect_num_clauses(&hdstats)?
-		} else {
-			Ok(())
-		}
-	}
-	fn check_asr_core(&mut self, set: &mut ClauseSet, block: &mut BacktrackBlock) -> VerificationResult<()> {
-		while let Some(id) = self.asr.parse_core()? {
-			self.stats.num_cores += 1usize;
-			self.parse_db_clause(id, unsafe { block.mut_block() }, false)?;
-			if self.config.check_core {
-				let rf = self.db.retrieve(id).unwrap();
-				let del = set.delete(&rf, unsafe { block.mut_block() });
-				if del.is_none() {
-					self.error_incorrect_core(id)?
-				}
-			}
-		}
-		Ok(())
-	}
-	fn check_asr_proof(&mut self, block: &mut BacktrackBlock) -> VerificationResult<()> {
-		let mut chain = ChainDb::new();
-		let mut subst = Substitution::new();
-		let mut refutation = false;
-		loop { match self.asr.parse_proof()? {
-			Some(AsrInstructionKind::Rup(id)) => {
-				self.stats.num_rups += 1usize;
-				let empty = self.parse_db_clause(id, unsafe { block.mut_block() }, true)?;
-				self.parse_db_chain(&mut chain, id, None)?;
-				if self.config.check_derivation {
-					let result = {
-						let up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst, id).unwrap();
-						up.propagate_rup(self.config.permissive)
-					};
-					if let Err(bx) = result {
-						self.error_incorrect_rup(id, bx)?
-					}
-				}
-				refutation |= empty;
-			},
-			Some(AsrInstructionKind::Sr(id)) => {
-				self.stats.num_srs += 1usize;
-				let empty = self.parse_db_clause(id, unsafe { block.mut_block() } , true)?;
-				self.parse_witness(&mut subst)?;
-				self.parse_db_chain(&mut chain, id, None)?;
-				while let Some(lat) = self.asr.parse_chain()? {
-					self.parse_db_chain(&mut chain, id, Some(lat))?;
-				}
-				if self.config.check_derivation {
-					let result = {
-						let up = UnitPropagator::<'_>::new(block, &mut chain, &self.db, &mut subst, id).unwrap();
-						up.propagate_wsr(self.config.permissive)
-					};
-					if let Err(bx) = result {
-						self.error_incorrect_wsr(id, bx)?
-					}
-				}
-				refutation |= empty;
-			},
-			Some(AsrInstructionKind::Del) => {
-				self.stats.num_del_instructions += 1usize;
-				while let Some(id) = self.asr.parse_chain()? {
-					match self.db.delete(id) {
-						Some(()) => self.stats.num_atomic_dels += 1usize,
-						None => if !self.config.permissive {
-							self.error_missing_deletion(id)?
-						},
-					}
-				}
-			}
-			None => break,
-		} }
-		if self.config.check_refutation{
-			if !refutation {
-				self.error_unrefuted()?
-			}
-		}
-		Ok(())
-	}
-	fn parse_set_clause(&mut self, set: &mut ClauseSet, block: &mut BacktrackBlock) -> VerificationResult<()> {
-		let mut writer = set.open(unsafe { block.mut_block() });
-		let lit = {
-			loop { match self.cnf.parse_clause()? {
-				Some(lit) => {
-					self.stats.max_variable |= unsafe { lit.variable_unchecked() };
-					match writer.write(lit) {
-						InsertionTest::Alright => (),
-						_ => break Some(lit),
-					}
-				},
-				None => break None,
-			} }
-		};
-		match lit {
-			None => writer.close(),
-			Some(l) => {
-				let cls = writer.extract();
-				self.error_invalid_clause(unsafe { block.mut_block() }, cls, l, None)?;
-			}
-		}
-		Ok(())
-	}
-	fn parse_db_clause(&mut self, id: ClauseIndex, block: &mut Block, proof: bool) -> VerificationResult<bool> {
-		let mut empty = true;
-		let processed = match self.db.open(block, id) {
-			Some(mut writer) => loop { match self.asr.parse_clause()? {
-				Some(lit) => {
-					empty = false;
-					self.stats.max_variable |= unsafe { lit.variable_unchecked() };
-					match writer.write(lit) {
-						InsertionTest::Alright => (),
-						_ => break Some(Some((writer.extract(), lit))),
-					}
-				},
-				None => {
-					let meta = ClauseDbMeta {};
-					writer.close(meta);
-					break Some(None)
-				},
-			} },
-			None => None,
-		};
-		match processed {
-			Some(None) => Ok(empty),
-			Some(Some((cls, lit))) => self.error_invalid_clause(&block, cls, lit, Some(proof))?,
-			None => self.error_conflict_id(id, proof)?,
-		}
-	}
-	fn parse_witness(&mut self, subst: &mut Substitution) -> VerificationResult<()> {
-		while let Some((var, lit)) = self.asr.parse_witness()? {
-			match subst.set(var, lit) {
-				InsertionTest::Alright => (),
-				_ => self.error_invalid_witness(subst, var, lit)?,
-			}
-		}
-		Ok(())
-	}
-	fn parse_db_chain(&mut self, chain: &mut ChainDb, id: ClauseIndex, lat: Option<ClauseIndex>) -> VerificationResult<()> {
-		let lid = match lat {
-			Some(lid) => {
-				if self.db.retrieve(lid).is_none() || id == lid {
-					self.error_missing_lateral_sr(id, lid)?;
-				}
-				lid
-			},
-			None => id, 
-		};
-		let repeated = {
-			if let Some(mut chw) = chain.open(lid) {
-				while let Some(id) = self.asr.parse_chain()? {
-					chw.write(id);
-				}
-				chw.close();
-				false
-			} else {
-				true
-			}
-		};
-		if repeated {
-			self.error_repeated_lateral_sr(chain, id, lid)?
-		}
-		Ok(())
-	}
-	fn error_missing_cnf_section<T>(&self) -> VerificationResult<T> {
-		Err(VerificationFailure::missing_cnf_section(self.cnf.position().clone()))
-	}
-	fn error_missing_core_section<T>(&self) -> VerificationResult<T> {
-		Err(VerificationFailure::missing_core_section(self.asr.position().clone()))
-	}
-	fn error_missing_proof_section<T>(&self) -> VerificationResult<T> {
-		Err(VerificationFailure::missing_proof_section(self.asr.position().clone()))
-	}
-	fn error_duplicated_cnf_section<T>(&self) -> VerificationResult<T> {
-		Err(VerificationFailure::duplicated_cnf_section(self.cnf.position().clone()))
-	}
-	fn error_duplicated_core_section<T>(&self) -> VerificationResult<T> {
-		Err(VerificationFailure::duplicated_core_section(self.cnf.position().clone()))
-	}
-	fn error_duplicated_proof_section<T>(&self) -> VerificationResult<T> {
-		Err(VerificationFailure::duplicated_proof_section(self.cnf.position().clone()))
-	}
-	fn error_incorrect_num_variables<T>(&self, hdstats: &CnfHeaderStats) -> VerificationResult<T> {
-		let pos = self.cnf.position().clone();
-		let vars = self.stats.max_variable;
-		let stat = hdstats.variables;
-		Err(VerificationFailure::incorrect_num_variables(pos, vars, stat))
-	}
-	fn error_incorrect_num_clauses<T>(&self, hdstats: &CnfHeaderStats) -> VerificationResult<T> {
-		let pos = self.cnf.position().clone();
-		let cls = self.stats.num_premises;
-		let stat = hdstats.clauses;
-		Err(VerificationFailure::incorrect_num_clauses(pos, cls, stat))
-	}
-	fn error_invalid_clause<T>(&mut self, block: &Block, mut clause: ClauseContainer, lit: Literal, proof: Option<bool>) -> VerificationResult<T> {
-		let pos = match proof {
-			None => self.cnf.position().clone(),
-			Some(_) => self.asr.position().clone(),
-		};
-		let num = match proof {
-			None => self.stats.num_premises,
-			Some(false) => self.stats.num_cores,
-			Some(true) => self.stats.num_proof_instructions(),
-		};
-		clause.0.push(lit);
-		if proof.is_none() {
-			while let Some(l) = self.cnf.parse_clause()? {
-				clause.0.push(l);
-			}
-		} else {
-			while let Some(l) = self.asr.parse_clause()? {
-				clause.0.push(l);
-			}
-		}
-		match (proof, block.check(lit)) {
-			(None, true) => Err(VerificationFailure::premise_repetition(pos, num, clause, lit)),
-			(None, false) => Err(VerificationFailure::premise_tautology(pos, num, clause, lit)),
-			(Some(false), true) => Err(VerificationFailure::core_repetition(pos, num, clause, lit)),
-			(Some(false), false) => Err(VerificationFailure::core_tautology(pos, num, clause, lit)),
-			(Some(true), true) => Err(VerificationFailure::inference_repetition(pos, num, clause, lit)),
-			(Some(true), false) => Err(VerificationFailure::inference_tautology(pos, num, clause, lit)),
-		}
-	}
-	fn error_invalid_witness<T>(&mut self, subst: &mut Substitution, var: Variable, lit: Literal) -> VerificationResult<T> {
-		let mut witness = subst.extract();
-		witness.0.push((var, lit));
-		while let Some((v, l)) = self.asr.parse_witness()? {
-			witness.0.push((v, l));
-		}
-		let num = self.stats.num_proof_instructions();
-		let pos = self.asr.position().clone();
-		match subst.set(var, lit) {
-			InsertionTest::Repeated => Err(VerificationFailure::witness_repetition(pos, num, witness)),
-			_ => Err(VerificationFailure::witness_inconsistency(pos, num, witness)),
-		}
-	}
-	fn error_conflict_id<T>(&mut self, id: ClauseIndex, proof: bool) -> VerificationResult<T> {
-		let pos = self.asr.position().clone();
-		let cls = self.db.extract(id).unwrap();
-		let num = if proof {
-			self.stats.num_proof_instructions()
-		} else {
-			self.stats.num_cores
-		};
-		if proof {
-			Err(VerificationFailure::conflict_inference_id(pos, num, id, cls))
-		} else {
-			Err(VerificationFailure::conflict_core_id(pos, num, id, cls))
-		}
-	}
-	fn error_incorrect_core<T>(&mut self, id: ClauseIndex) -> VerificationResult<T> {
-		let cls = self.db.extract(id).unwrap();
-		let num = self.stats.num_cores;
-		let pos = self.asr.position().clone();
-		Err(VerificationFailure::incorrect_core(pos, num, id, cls))
-	}
-	fn error_incorrect_rup<T>(&mut self, id: ClauseIndex, bx: Box<PropagationError>) -> VerificationResult<T> {
-		let pos = self.asr.position().clone();
-		let num = self.stats.num_proof_instructions();
-		let cls = self.db.extract(id).unwrap();
-		let idchn = self.db.extract_chain(&bx.chain, bx.length).unwrap();
-		match bx.result {
-			PropagationResult::Missing => {
-				let issue = *bx.chain.get(bx.length).unwrap();
-				Err(VerificationFailure::missing_rup(pos, num, cls, issue, idchn))
-			},
-			PropagationResult::Null => {
-				let issue = *bx.chain.get(bx.length).unwrap();
-				let issuecls = self.db.extract(issue).unwrap();
-				Err(VerificationFailure::null_rup(pos, num, cls, issue, issuecls, idchn))
-			},
-			_ => Err(VerificationFailure::unchained_rup(pos, num, cls, idchn)),
-		}
-	}
-	fn error_incorrect_wsr<T>(&mut self, id: ClauseIndex, mut bx: Box<PropagationError>) -> VerificationResult<T> {
-		let pos = self.asr.position().clone();
-		let num = self.stats.num_proof_instructions();
-		let cls = self.db.extract(id).unwrap();
-		let idchn = self.db.extract_chain(&bx.chain, bx.length).unwrap();
-		let latid = bx.lateral;
-		let latcls = self.db.extract(latid).unwrap();
-		let wtn = mem::replace(&mut bx.subst, WitnessContainer(Vec::new()));
-		match bx.result {
-			PropagationResult::Missing => {
-				let issue = *bx.chain.get(bx.length).unwrap();
-				Err(VerificationFailure::missing_sr(pos, num, cls, Some((latid, latcls)), wtn, issue, idchn))
-			},
-			PropagationResult::Null => {
-				let issue = *bx.chain.get(bx.length).unwrap();
-				let issuecls = self.db.extract(issue).unwrap();
-				Err(VerificationFailure::null_sr(pos, num, cls, Some((latid, latcls)), wtn, issue, issuecls, idchn))
-			},
-			_ => Err(VerificationFailure::unchained_sr(pos, num, cls, Some((latid, latcls)), wtn, idchn)),
-		}
-	}
-	fn error_missing_lateral_sr<T>(&mut self, id: ClauseIndex, latid: ClauseIndex) -> VerificationResult<T> {
-		let pos = self.asr.position().clone();
-		let num = self.stats.num_proof_instructions();
-		let cls = self.db.extract(id).unwrap();
-		let mut chn = Vec::<ClauseIndex>::new();
-		while let Some(cid) = self.asr.parse_chain()? {
-			chn.push(cid);
-		}
-		Err(VerificationFailure::missing_lateral_sr(pos, num, cls, latid, RawChainContainer(chn)))
-	}
-	fn error_repeated_lateral_sr<T>(&mut self, chain: &ChainDb, id: ClauseIndex, latid: ClauseIndex) -> VerificationResult<T> {
-		let pos = self.asr.position().clone();
-		let num = self.stats.num_proof_instructions();
-		let cls = self.db.extract(id).unwrap();
-		let latcls = self.db.extract(latid).unwrap();
-		let chn1 = chain.extract(latid).unwrap();
-		let mut chn2 = Vec::<ClauseIndex>::new();
-		while let Some(cid) = self.asr.parse_chain()? {
-			chn2.push(cid);
-		}
-		Err(VerificationFailure::repeated_lateral_sr(pos, num, cls, latid, latcls, RawChainContainer(chn1), RawChainContainer(chn2)))
-	}
-	fn error_missing_deletion<T>(&mut self, id: ClauseIndex) -> VerificationResult<T> {
-		let pos = self.asr.position().clone();
-		let num = self.stats.num_proof_instructions();
-		Err(VerificationFailure::missing_deletion(pos, num, id))
-	}
-	fn error_unrefuted<T>(&mut self) -> VerificationResult<T> {
-		let pos = self.asr.position().clone();
-		Err(VerificationFailure::unrefuted(pos))
+		self.stats.set_time_derivation();
+		self.stats
 	}
 }
 
-pub struct CheckingResult {
-	pub result: VerificationResult<()>,
-	pub stats: CheckerStats,
+pub struct AsrPremiseChecker<'a, 'b: 'a> {
+	cnf: &'a mut dyn AsrParser,
+	config: &'a CheckerConfig,
+	logger: &'a mut Logger<'b>,
+	set: &'a mut ClauseSet,
+	block: &'a mut BacktrackBlock,
+	stats: &'a mut CheckerStats,
 }
-impl CheckingResult {
-	pub fn final_result(&self) -> Option<bool> {
-		match &self.result {
-			Ok(()) => Some(true),
-			Err(err) => if err.failure() {
-				Some(false)
+impl<'a, 'b: 'a> AsrPremiseChecker<'a, 'b> {
+	pub fn check(mut self) {
+		let mut hdfound = false;
+		loop { match &self.cnf.skip_to_header() {
+			Positioned(Some(hd), pos) if hd == &AsrChecker::<'_, '_>::CnfHeader => if !hdfound {
+				hdfound = true;
+				let hdstats = &self.cnf.parse_cnf_header();
+				while let Positioned(Some(()), pos) = &self.cnf.parse_formula() {
+					self.stats.num_premises += 1usize;
+					if let Some(bx) = self.parse_clause() {
+						self.error_invalid_clause(pos, bx);
+					}
+				}
+				if &self.stats.max_variable > &hdstats.variables {
+					self.error_incorrect_num_variables(pos, hdstats);
+				} else if &self.stats.num_premises != &hdstats.clauses {
+					self.error_incorrect_num_clauses(pos, hdstats);
+				}
 			} else {
+				self.error_duplicated_section(pos);
+			},
+			Positioned(None, pos) => {
+				if hdfound {
+					self.error_missing_section(pos);
+				}
+				break;
+			}
+			_ => (),
+		} }
+	}
+	fn parse_clause(&mut self) -> Option<Box<ClauseIssues>> {
+		let mut issues = ClauseIssuesBuilder::new();
+		{
+			let mut writer = self.set.open(unsafe { self.block.mut_block() });
+			while let Some(lit) = &self.cnf.parse_clause() {
+				self.stats.max_variable |= unsafe { lit.variable_unchecked() };
+				let test = writer.write(*lit);
+				if test != InsertionTest::Alright {
+					issues.set(|| writer.extract());
+					issues.push_issue(*lit, test == InsertionTest::Repeated);
+				}
+				issues.push_literal(*lit);
+			}
+			if issues.is_ok(self.config.permissive) {
+				writer.close()
+			}
+		}
+		issues.extract()
+	}
+	fn process_error(&mut self, err: VerificationFailure) {
+		let handle = self.logger.handle(self.config.output);
+		self.stats.errors.push_error(handle, err);
+	}
+	fn error_duplicated_section(&mut self, pos: &StreamPosition) {
+		let pos = pos.source(self.cnf.name());
+		let err = VerificationFailure::duplicated_cnf_section(pos);
+		self.process_error(err);
+	}
+	fn error_missing_section(&mut self, pos: &StreamPosition) {
+		let pos = pos.source(self.cnf.name());
+		let err = VerificationFailure::missing_cnf_section(pos);
+		self.process_error(err);
+	}
+	fn error_incorrect_num_variables(&mut self, pos: &StreamPosition, hdstats: &CnfHeaderStats) {
+		let vars = self.stats.max_variable;
+		let stat = hdstats.variables;
+		let pos = pos.source(self.cnf.name());
+		let err = VerificationFailure::incorrect_num_variables(pos, vars, stat);
+		self.process_error(err);
+	}
+	fn error_incorrect_num_clauses(&mut self, pos: &StreamPosition, hdstats: &CnfHeaderStats) {
+		let vars = self.stats.num_premises;
+		let stat = hdstats.clauses;
+		let pos = pos.source(self.cnf.name());
+		let err = VerificationFailure::incorrect_num_clauses(pos, vars, stat);
+		self.process_error(err);
+	}
+	fn error_invalid_clause(&mut self, pos: &StreamPosition, issues: Box<ClauseIssues>) {
+		let num = self.stats.num_premises;
+		let pos = pos.source(self.cnf.name());
+		let err = VerificationFailure::invalid_premise(pos, num, issues);
+		self.process_error(err);
+	}
+}
+
+pub struct AsrCoreChecker<'a, 'b: 'a> {
+	asr: &'a mut dyn AsrParser,
+	config: &'a CheckerConfig,
+	logger: &'a mut Logger<'b>,
+	db: &'a mut ClauseDb,
+	set: &'a mut ClauseSet,
+	block: &'a mut BacktrackBlock,
+	stats: &'a mut CheckerStats,
+}
+impl<'a, 'b: 'a>  AsrCoreChecker<'a, 'b> {
+	pub fn check(mut self) {
+		loop { match &self.asr.skip_to_header() {
+			Positioned(Some(hd), _) if hd == &AsrChecker::<'_, '_>::CoreHeader => {
+				while let Positioned(Some(id), pos) = &self.asr.parse_core() {
+					self.stats.num_cores += 1usize;
+					if self.stats.num_cores <= self.config.core_limit {
+						let cls = match self.parse_clause(*id) {
+							Some(None) => true,
+							Some(Some(bx)) => {
+								let ok = bx.is_ok(self.config.permissive);
+								self.error_invalid_clause(pos, bx);
+								ok
+							},
+							None => {
+								self.error_conflict_id(pos, *id);
+								false
+							},
+						};
+						if cls && self.config.check_core {
+							let rf = self.db.retrieve(*id).unwrap();
+							let del = self.set.delete(&rf, unsafe { self.block.mut_block() });
+							if del.is_none() {
+								self.error_incorrect_core(pos, *id);
+							}
+						}
+					} else {
+						while let Some(_) = &self.asr.parse_clause() {
+						}
+					}
+				}
+				break;
+			},
+			Positioned(Some(hd), pos) if hd == &AsrChecker::<'_, '_>::ProofHeader => {
+				self.error_misplaced_section(pos);
+			}
+			Positioned(None, pos) => {
+				self.error_missing_section(pos);
+				break;
+			}
+			_ => (),
+		} }
+	}
+	fn parse_clause(&mut self, id: ClauseIndex) -> Option<Option<Box<ClauseIssues>>> {
+		let mut issues = ClauseIssuesBuilder::new();
+		match self.db.open(unsafe { self.block.mut_block() }, id) {
+			Some(mut writer) => {
+				while let Some(lit) = &self.asr.parse_clause() {
+					self.stats.max_variable |= unsafe { lit.variable_unchecked() };
+					let test = writer.write(*lit);
+					if test != InsertionTest::Alright {
+						issues.set(|| writer.extract());
+						issues.push_issue(*lit, test == InsertionTest::Repeated);
+					}
+					issues.push_literal(*lit);
+				}
+				if issues.is_ok(self.config.permissive) {
+					if writer.length() == 0usize {
+						self.stats.num_contradictions += 1usize;
+					}
+					let meta = ClauseDbMeta {};
+					writer.close(meta);
+					Some(None)
+				} else {
+					Some(issues.extract())
+				}
+			},
+			None => {
+				while let Some(_) = &self.asr.parse_clause() {
+				}
 				None
 			},
 		}
+	}
+	fn process_error(&mut self, err: VerificationFailure) {
+		let handle = self.logger.handle(self.config.output);
+		self.stats.errors.push_error(handle, err);
+	}
+	fn error_missing_section(&mut self, pos: &StreamPosition) {
+		let pos = pos.source(self.asr.name());
+		let err = VerificationFailure::missing_core_section(pos);
+		self.process_error(err);
+	}	
+	fn error_misplaced_section(&mut self, pos: &StreamPosition) {
+		let pos = pos.source(self.asr.name());
+		let err = VerificationFailure::misplaced_proof_section(pos);
+		self.process_error(err);
+	}
+	fn error_incorrect_core(&mut self, pos: &StreamPosition, id: ClauseIndex) {
+		let pos = pos.source(self.asr.name());
+		let cls = self.db.extract(id).unwrap();
+		let num = self.stats.num_cores;
+		let err = VerificationFailure::incorrect_core(pos, num, id, cls);
+		self.process_error(err);
+	}
+	fn error_conflict_id(&mut self, pos: &StreamPosition, id: ClauseIndex) {
+		let pos = pos.source(self.asr.name());
+		let cls = self.db.extract(id).unwrap();
+		let num = self.stats.num_cores;
+		let err = VerificationFailure::conflict_core_id(pos, num, id, cls);
+		self.process_error(err);
+	}
+	fn error_invalid_clause(&mut self, pos: &StreamPosition, issues: Box<ClauseIssues>) {
+		let num = self.stats.num_premises;
+		let pos = pos.source(self.asr.name());
+		let err = VerificationFailure::invalid_core(pos, num, issues);
+		self.process_error(err);
+	}
+}
+
+pub struct AsrProofChecker<'a, 'b: 'a> {
+	asr: &'a mut dyn AsrParser,
+	config: &'a CheckerConfig,
+	logger: &'a mut Logger<'b>,
+	db: &'a mut ClauseDb,
+	block: &'a mut BacktrackBlock,
+	stats: &'a mut CheckerStats,
+	chain: ChainDb,
+	subst: Substitution,
+}
+#[allow(unused_assignments)]
+impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
+	pub fn check(mut self) {
+		let mut hdfound = false;
+		loop { match &self.asr.skip_to_header() {
+			Positioned(Some(hd), hdpos) if hd == &AsrChecker::<'_, '_>::ProofHeader => {
+				if hdfound {
+					self.error_duplicated_section(hdpos);
+				} else {
+					hdfound = true;
+					loop { match &self.asr.parse_proof() {
+						Positioned(Some(AsrInstructionKind::Rup(id)), pos) => self.check_inference(*id, pos, false),
+						Positioned(Some(AsrInstructionKind::Wsr(id)), pos) => self.check_inference(*id, pos, true),
+						Positioned(Some(AsrInstructionKind::Del), pos) => self.check_del(pos),
+						Positioned(None, pos) => {
+							if self.config.check_refutation && self.stats.num_contradictions == 0usize {
+								self.error_unrefuted(pos);
+							}
+						},
+					} }
+				}
+			},
+			Positioned(Some(hd), pos) if hd == &AsrChecker::<'_, '_>::CoreHeader => {
+				self.error_misplaced_section(pos);
+			}
+			Positioned(None, pos) => {
+				if !hdfound {
+					self.error_missing_section(pos);
+				}
+				break;
+			}
+			_ => (),
+		} }
+	}
+	fn check_inference(&mut self, id: ClauseIndex, pos: &StreamPosition, wsr: bool) {
+		if wsr {
+			self.stats.num_wsrs += 1usize;
+		} else {
+			self.stats.num_rups += 1usize;
+		}
+		if self.stats.num_proof_instructions() <= self.config.proof_limit {
+			let cls = match self.parse_clause(id) {
+				Some(None) => true,
+				Some(Some(bx)) => {
+					let ok = bx.is_ok(self.config.permissive);
+					self.error_invalid_clause(pos, bx, wsr);
+					ok
+				},
+				None => {
+					self.error_conflict_id(pos, id, wsr);
+					false
+				},
+			};
+			let wtn = if wsr {
+				match self.parse_witness() {
+					None => true,
+					Some(bx) => {
+						let ok = bx.is_ok(self.config.permissive);
+						self.error_invalid_witness(pos, bx);
+						ok
+					},
+				}
+			} else {
+				true
+			};
+			match self.parse_chain(id, wsr) {
+				None => (),
+				Some(bx) => self.error_invalid_laterals(pos, id, bx),
+			}
+			let result = {
+				let mut up = UnitPropagator::<'_>::new(&mut self.block, &mut self.chain, &self.db, &mut self.subst);
+				if cls && wtn && self.config.check_derivation {
+					up.propagate_inference(id, wsr);
+					up.extract()
+				} else {
+					None
+				}
+			};
+			if let Some(bx) = result {
+				self.error_incorrect_inference(pos, id, bx, wsr);
+			}
+		} else {
+			while let Some(_) = &self.asr.parse_clause() {
+			}
+			if wsr { while let Some(_) = &self.asr.parse_witness() {
+			} }
+			while let Some(_) = &self.asr.parse_chain() {
+			}
+			while let Some(_) = &self.asr.parse_chain() {
+				while let Some(_) = &self.asr.parse_chain() {
+				}
+			}
+		}
+	}
+	fn check_del(&mut self, pos: &StreamPosition) {
+		self.stats.num_dels += 1usize;
+		if self.stats.num_proof_instructions() <= self.config.proof_limit {
+			while let Some(id) = &self.asr.parse_chain() {
+				let rf = self.db.retrieve(*id);
+				match rf {
+					Some(r) => {
+						self.stats.num_deletions += 1usize;
+						if r.size() == 0usize {
+							self.stats.num_contradictions -= 1usize;
+						}
+					},
+					None => self.error_missing_deletion(pos, *id),
+				}
+				self.db.delete(*id);
+			}
+		} else {
+			while let Some(_) = &self.asr.parse_chain() {
+			}
+		}
+	}
+	fn parse_clause(&mut self, id: ClauseIndex) -> Option<Option<Box<ClauseIssues>>> {
+		let mut issues = ClauseIssuesBuilder::new();
+		match self.db.open(unsafe { self.block.mut_block() }, id) {
+			Some(mut writer) => {
+				while let Some(lit) = &self.asr.parse_clause() {
+					self.stats.max_variable |= unsafe { lit.variable_unchecked() };
+					let test = writer.write(*lit);
+					if test != InsertionTest::Alright {
+						issues.set(|| writer.extract());
+						issues.push_issue(*lit, test == InsertionTest::Repeated);
+					}
+					issues.push_literal(*lit);
+				}
+				if issues.is_ok(self.config.permissive) {
+					if writer.length() == 0usize {
+						self.stats.num_contradictions += 1usize;
+					}
+					let meta = ClauseDbMeta {};
+					writer.close(meta);
+					Some(None)
+				} else {
+					Some(issues.extract())
+				}
+			},
+			None => {
+				while let Some(_) = &self.asr.parse_clause() {
+				}
+				None
+			},
+		}
+	}
+	fn parse_witness(&mut self) -> Option<Box<WitnessIssues>> {
+		let mut issues = WitnessIssuesBuilder::new();
+		while let Some((var, lit)) = &self.asr.parse_witness() {
+			self.stats.max_variable |= *var;
+			lit.variable().map(|v| self.stats.max_variable |= v);
+			let test = self.subst.set(*var, *lit);
+			if test != InsertionTest::Alright {
+				issues.set(|| self.subst.extract());
+				issues.push_issue(*var, *lit, test == InsertionTest::Repeated);
+			}
+			issues.push_mapping(*var, *lit);
+		}
+		issues.extract()
+	}
+	fn parse_chain(&mut self, id: ClauseIndex, wsr: bool) -> Option<Box<Vec<(ClauseIndex, bool)>>> {
+		let mut issues = ChainIssuesBuilder::new();
+		let mut lat = id;
+		let mut first = true;
+		loop {
+			if self.db.retrieve(lat).is_none() || (lat == id && !first) {
+				issues.push_issue(lat, id, false);
+				while let Some(_) = &self.asr.parse_chain() {
+				}
+			} else {
+				first = false;
+				match self.chain.open(lat) {
+					Some(mut writer) => {
+						while let Some(cid) = &self.asr.parse_chain() {
+							writer.write(*cid);
+						}
+						writer.close();
+					},
+					None => {
+						issues.push_issue(lat, id, true);
+						while let Some(_) = &self.asr.parse_chain() {
+						}
+					},
+				}
+				if wsr {
+					match &self.asr.parse_chain() {
+						Some(cid) => lat = *cid,
+						None => break,
+					}
+				} else {
+					break;
+				}
+			}
+		}
+		issues.extract()
+	}
+	fn process_error(&mut self, err: VerificationFailure) {
+		let handle = self.logger.handle(self.config.output);
+		self.stats.errors.push_error(handle, err);
+	}
+	fn error_missing_section(&mut self, pos: &StreamPosition) {
+		let pos = pos.source(self.asr.name());
+		let err = VerificationFailure::missing_proof_section(pos);
+		self.process_error(err);
+	}	
+	fn error_misplaced_section(&mut self, pos: &StreamPosition) {
+		let pos = pos.source(self.asr.name());
+		let err = VerificationFailure::misplaced_core_section(pos);
+		self.process_error(err);
+	}
+	fn error_duplicated_section(&mut self, pos: &StreamPosition) {
+		let pos = pos.source(self.asr.name());
+		let err = VerificationFailure::duplicated_proof_section(pos);
+		self.process_error(err);
+	}
+	fn error_conflict_id(&mut self, pos: &StreamPosition, id: ClauseIndex, wsr: bool) {
+		let pos = pos.source(self.asr.name());
+		let cls = self.db.extract(id).unwrap();
+		let num = self.stats.num_cores;
+		let err = if wsr {
+			VerificationFailure::conflict_rup_id(pos, num, id, cls)
+		} else {
+			VerificationFailure::conflict_wsr_id(pos, num, id, cls)
+		};
+		self.process_error(err);
+	}
+	fn error_invalid_clause(&mut self, pos: &StreamPosition, issues: Box<ClauseIssues>, wsr: bool) {
+		let num = self.stats.num_premises;
+		let pos = pos.source(self.asr.name());
+		let err = if wsr {
+			VerificationFailure::invalid_wsr(pos, num, issues)
+		} else {
+			VerificationFailure::invalid_rup(pos, num, issues)
+		};
+		self.process_error(err);
+	}
+	fn error_invalid_witness(&mut self, pos: &StreamPosition, issues: Box<WitnessIssues>) {
+		let pos = pos.source(self.asr.name());
+		let num = self.stats.num_proof_instructions();
+		let err = VerificationFailure::invalid_witness(pos, num, issues);
+		self.process_error(err);
+	}
+	fn error_invalid_laterals(&mut self, pos: &StreamPosition, id: ClauseIndex, bx: Box<Vec<(ClauseIndex, bool)>>) {
+		let pos = pos.source(self.asr.name());
+		let num = self.stats.num_proof_instructions();
+		let cls = self.db.extract(id).unwrap();
+		let err = VerificationFailure::invalid_laterals(pos, num, cls, bx);
+		self.process_error(err);
+	}
+	fn error_incorrect_inference(&mut self, pos: &StreamPosition, id: ClauseIndex, bx: Box<Vec<(ClauseIndex, PropagationIssues, WitnessContainer)>>, wsr: bool) {
+		let num = self.stats.num_proof_instructions();
+		for (lat, issues, witness) in *bx {
+			let pos = pos.source(self.asr.name());
+			let cls = self.db.extract(id).unwrap();
+			let err = if wsr {
+				let latopt = if lat == id {
+					None
+				} else {
+					Some(lat)
+				};
+				let latclause = self.db.extract(id).unwrap();
+				VerificationFailure::incorrect_wsr(pos, num, cls, issues, latopt, latclause, witness)
+			} else {
+				VerificationFailure::incorrect_rup(pos, num, cls, issues)
+			};
+			self.process_error(err);
+		}
+	}
+	fn error_missing_deletion(&mut self, pos: &StreamPosition, id: ClauseIndex) {
+		let pos = pos.source(self.asr.name());
+		let num = self.stats.num_proof_instructions();
+		let err = VerificationFailure::missing_deletion(pos, num, id);
+		self.process_error(err);
+	}
+	fn error_unrefuted(&mut self, pos: &StreamPosition) {
+		let pos = pos.source(self.asr.name());
+		let num = self.stats.num_proof_instructions();
+		let err = VerificationFailure::unrefuted(pos, num);
+		self.process_error(err);
 	}
 }

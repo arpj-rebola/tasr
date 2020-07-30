@@ -4,7 +4,7 @@ use std::{
 
 use crate::{
 	bst::{BinarySearchTree},
-	clausedb::{WitnessContainer},
+	basic::{WitnessContainer},
 	variable::{Literal, Variable},
 };
 
@@ -184,6 +184,11 @@ impl BacktrackBlock {
 			self.block.clear(*lit);
 		}
 		self.lits.clear();
+	}
+}
+impl Debug for BacktrackBlock {
+	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
+		write!(f, "{:?} || {:?}", self.block, self.lits)
 	}
 }
 

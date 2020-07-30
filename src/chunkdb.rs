@@ -163,7 +163,10 @@ pub struct ChunkDbReference<'a> {
 impl<'a> ChunkDbReference<'a> {
 	pub fn age<'b>(self) -> ChunkDbReference<'b> where 'a: 'b {
 		self
-    }
+	}
+	pub fn size(&self) -> usize {
+		unsafe { *self.db.vec.get_unchecked(self.addr.index()) as usize }
+	}
 	pub fn iter<'b: 'c, 'c>(&'b self) -> ChunkDbIterator<'c> where 'a: 'b {
 		let size = unsafe { *self.db.vec.get_unchecked(self.addr.index()) };
 		ChunkDbIterator::<'c> {

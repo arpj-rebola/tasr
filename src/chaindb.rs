@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     bst::{BinarySearchTree},
-    clausedb::{ClauseIndex},
+    basic::{ClauseIndex},
 };
 
 pub struct ChainDb {
@@ -80,7 +80,7 @@ mod test {
     };
 	use rand::{self, Rng};
 	use crate::{
-        clausedb::{ClauseIndex},
+        basic::{ClauseIndex},
 		chaindb::{ChainDb},
     };
     

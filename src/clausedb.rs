@@ -1,153 +1,17 @@
 use std::{
-	cmp::{Ordering},
-	convert::{TryFrom},
-	fmt::{self, Debug, Formatter, Display},
+	fmt::{self, Debug, Formatter},
 	iter::{Enumerate},
 	mem::{self, ManuallyDrop},
-	ops::{BitOr, BitOrAssign},
 	slice::{Iter},
 };
 
 use crate::{
 	assignment::{Block, InsertionTest},
 	hasher::{Hasher32, Hashable32, AmxHasher, UnwindHasher},
-	variable::{Literal, Variable},
+	variable::{Literal},
 	chunkdb::{DbAddress, ChunkDb, ChunkDbReference, ChunkDbWriter, ChunkDbIterator},
+	basic::{ClauseIndex, ClauseContainer, ChainContainer},
 };
-
-#[derive(Debug)]
-pub struct ClauseContainer(pub Vec<Literal>);
-impl Display for ClauseContainer {
-	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-		let mut first = false;
-		write!(f, "[")?;
-		for lit in &self.0 {
-			if first {
-				write!(f, ", ")?;
-			} else {
-				first = true;
-			}
-			write!(f, "{}", lit)?;
-		}
-		write!(f, "]")
-	}
-}
-
-#[derive(Debug)]
-pub struct ChainContainer(pub Vec<(ClauseIndex, ClauseContainer)>);
-impl Display for ChainContainer {
-	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-		for (index, clause) in &self.0 {
-			write!(f, "{}: {}\n", index, clause)?;
-		}
-		Ok(())
-	}
-}
-
-#[derive(Debug)]
-pub struct RawChainContainer(pub Vec<ClauseIndex>);
-impl Display for RawChainContainer {
-	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-		let mut first = false;
-		write!(f, "(")?;
-		for lit in &self.0 {
-			if first {
-				write!(f, ", ")?;
-			} else {
-				first = true;
-			}
-			write!(f, "{}", lit)?;
-		}
-		write!(f, ")")
-	}
-}
-
-#[derive(Debug)]
-pub struct WitnessContainer(pub Vec<(Variable, Literal)>);
-impl Display for WitnessContainer {
-	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-		let mut first = false;
-		write!(f, "{{")?;
-		for (var, lit) in &self.0 {
-			if first {
-				write!(f, ", ")?;
-			} else {
-				first = true;
-			}
-			write!(f, "{} -> {}", var, lit)?;
-		}
-		write!(f, "}}")
-	}
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd)]
-#[repr(transparent)]
-pub struct ClauseIndex {
-	val: u32,
-}
-impl ClauseIndex {
-	pub const MaxValue: i64 = (u32::max_value() as i64) + 1i64;
-	pub fn index(&self) -> usize {
-		self.val as usize
-	}
-}
-impl TryFrom<u64> for ClauseIndex {
-	type Error = u64;
-	fn try_from(num: u64) -> Result<ClauseIndex, u64> {
-		if num > 0u64 && num <= ClauseIndex::MaxValue as u64 {
-			Ok(ClauseIndex { val: (num - 1u64) as u32 })
-		} else {
-			Err(num)
-		}
-	}
-}
-impl TryFrom<i64> for ClauseIndex {
-	type Error = i64;
-	fn try_from(num: i64) -> Result<ClauseIndex, i64> {
-		if num > 0i64 && num <= ClauseIndex::MaxValue {
-			Ok(ClauseIndex { val: (num - 1i64) as u32 })
-		} else {
-			Err(num)
-		}
-	}
-}
-impl BitOr for ClauseIndex {
-	type Output = ClauseIndex;
-	fn bitor(self, id: ClauseIndex) -> ClauseIndex {
-		ClauseIndex { val: self.val.max(id.val) }
-	}
-}
-impl BitOrAssign for ClauseIndex {
-	fn bitor_assign(&mut self, id: ClauseIndex) {
-		self.val = self.val.max(id.val)
-	}
-}
-impl BitOr<ClauseIndex> for Option<ClauseIndex> {
-	type Output = Option<ClauseIndex>;
-	fn bitor(self, id: ClauseIndex) -> Option<ClauseIndex> {
-		self.map_or_else(|| Some(id), |x| Some(x | id))
-	}
-}
-impl BitOrAssign<ClauseIndex> for Option<ClauseIndex> {
-	fn bitor_assign(&mut self, id: ClauseIndex) {
-		self.as_mut().map(|x| x.bitor_assign(id));
-	}
-}
-impl Debug for ClauseIndex {
-	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
-		write!(f, "#{}", self.index())
-	}
-}
-impl Display for ClauseIndex {
-	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
-		write!(f, "#{}", self.index())
-	}
-}
-impl Ord for ClauseIndex {
-	fn cmp(&self, other: &Self) -> Ordering {
-		self.val.cmp(&other.val)
-	}
-}
 
 pub struct ClauseDbMeta {
 	// pub tautology: bool,
@@ -188,7 +52,7 @@ impl ClauseDb {
 	pub fn open<'a, 'b: 'a>(&'a mut self, block: &'b mut Block, id: ClauseIndex) -> Option<ClauseDbWriter<'a>> {
 		let index = id.index();
 		if index >= self.index.len() {
-			self.index.resize_with(index << 1, || None);
+			self.index.resize_with((index << 1) + 1usize, || None);
 		}
 		let rf = unsafe { self.index.get_unchecked_mut(index) };
 		if rf.is_none() {
@@ -251,7 +115,7 @@ impl Debug for ClauseDb {
 		let size = self.index.len();
 		write!(f, "{{\n")?;
 		for n in 0..size {
-			let index = ClauseIndex { val: n as u32 };
+			let index = ClauseIndex::new(n as u32);
 			match self.retrieve(index) {
 				Some(rf) => write!(f, "\t{:?}: {:?}\n", index, rf)?,
 				None => (),
@@ -269,7 +133,7 @@ impl<'a> Iterator for ClauseDbIterator<'a> {
 	fn next(&mut self) -> Option<ClauseIndex> {
 		loop { match self.it.next() {
 			Some((n, rf)) => if rf.is_some() {
-				break Some(ClauseIndex { val: n as u32 });
+				break Some(ClauseIndex::new(n as u32));
 			},
 			None => break None,
 		} }
@@ -418,7 +282,7 @@ impl<'a> ClauseSetWriter<'a> {
 			it: self.dbw.as_ref().unwrap().iter()
 		}
 	}
-	pub fn extract(self) -> ClauseContainer {
+	pub fn extract(&self) -> ClauseContainer {
 		ClauseContainer(self.iter().copied().collect())
 	}
 	fn revert(&mut self) {
@@ -484,6 +348,9 @@ impl<'a> ClauseReference<'a> {
 	pub fn extract(&self) -> ClauseContainer {
 		ClauseContainer(self.iter().copied().collect())
 	}
+	pub fn size(&self) -> usize {
+		self.rf.size()
+	}
 }
 impl<'a> Hashable32 for ClauseReference<'a> {
 	fn hash<H: Hasher32>(&self, hs: &mut H) {
@@ -535,7 +402,8 @@ mod test {
 	use crate::{
 		assignment::{Block, InsertionTest},
 		chunkdb::{ChunkDb},
-		clausedb::{ClauseSet, ClauseReference, ClauseDb, ClauseDbMeta, ClauseIndex},
+		clausedb::{ClauseSet, ClauseReference, ClauseDb, ClauseDbMeta},
+		basic::{ClauseIndex},
 		variable::{Literal, Variable},
 	};
 
@@ -705,7 +573,7 @@ mod test {
 		for op in &ops {
 			match op {
 				TestOp::In(index, vec) => {
-					let index = ClauseIndex { val: *index };
+					let index = ClauseIndex::new(*index);
 					assert!(cdb.retrieve(index).is_none());
 					let mut dbw = cdb.open(&mut block, index).unwrap();
 					for lit in vec {
@@ -716,7 +584,7 @@ mod test {
 					dbw.close(meta);
 				},
 				TestOp::Out(index) => {
-					let index = ClauseIndex { val: *index };
+					let index = ClauseIndex::new(*index);
 					assert!(cdb.retrieve(index).is_some());
 					let del = cdb.delete(index);
 					assert!(del.is_some());
@@ -738,7 +606,7 @@ mod test {
 					},
 				}
 			}
-			let index = ClauseIndex { val: m };
+			let index = ClauseIndex::new(m);
 			match cls {
 				Some(vec) => {
 					let rf = cdb.retrieve(index).unwrap();

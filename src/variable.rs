@@ -1,13 +1,14 @@
 use std::{
 	cmp::{Ordering},
 	convert::{TryFrom},
-	fmt::{self, Formatter, Debug, Display},
+	fmt::{self, Formatter, Debug, Display, Binary},
 	ops::{BitOr, BitOrAssign},
 };
 use rand::{Rng,
 	distributions::{Uniform},
 };
 use crate::{
+	basic::{OutputInteger32},
 	hasher::{Hashable32, Hasher32},
 };
 
@@ -45,8 +46,6 @@ impl TryFrom<i64> for Variable {
 	fn try_from(num: i64) -> Result<Variable, i64> {
 		if num > 0i64 && num <= Self::MaxValue {
 			Ok(Variable::new((num as u32) << 1))
-		} else if num < 0i64 && num >= -Self::MaxValue {
-			Ok(Variable::new((-num as u32) << 1))
 		} else {
 			Err(num)
 		}
@@ -95,12 +94,17 @@ impl BitOrAssign for Variable {
 }
 impl Debug for Variable {
 	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
-		write!(f, "{}", self.val >> 1usize)
+		write!(f, "{}", self.val >> 1)
 	}
 }
 impl Display for Variable {
 	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
-		write!(f, "{}", self.val >> 1usize)
+		write!(f, "{}", self.val >> 1)
+	}
+}
+impl Binary for Variable {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		write!(f, "{:b}", OutputInteger32(self.val >> 1))
 	}
 }
 
@@ -169,12 +173,17 @@ impl Ord for MaybeVariable {
 }
 impl Debug for MaybeVariable {
 	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
-		write!(f, "{}", self.val >> 1usize)
+		write!(f, "{}", self.val >> 1)
 	}
 }
 impl Display for MaybeVariable {
 	fn fmt(&self , f: &mut Formatter<'_>) -> fmt::Result {
 		write!(f, "{}", self.val >> 1)
+	}
+}
+impl Binary for MaybeVariable {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		write!(f, "{:b}", OutputInteger32(self.val >> 1))
 	}
 }
 
@@ -305,6 +314,11 @@ impl Display for Literal {
 		}
 	}
 }
+impl Binary for Literal {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		write!(f, "{:b}", OutputInteger32(self.val))
+	}
+}
 
 #[cfg(test)]
 mod test {
@@ -393,9 +407,9 @@ mod test {
 	fn test_variable_literal_making() {
 		assert!(Variable::try_from(0i64) == Err(0i64));
 		assert!(Variable::try_from(1i64) == Ok(Variable { val: 2u32 }));
-		assert!(Variable::try_from(-1i64) == Ok(Variable { val: 2u32 }));
+		assert!(Variable::try_from(-1i64) == Err(-1i64));
 		assert!(Variable::try_from(Variable::MaxValue) == Ok(Variable { val: u32::max_value() }));
-		assert!(Variable::try_from(-Variable::MaxValue) == Ok(Variable { val: u32::max_value() }));
+		assert!(Variable::try_from(-Variable::MaxValue) == Err(-Variable::MaxValue));
 		assert!(Variable::try_from(Variable::MaxValue + 1i64) == Err(Variable::MaxValue + 1i64));
 		assert!(Variable::try_from(-Variable::MaxValue - 1i64) == Err(-Variable::MaxValue - 1i64));
 		assert!(Literal::try_from(0i64) == Err(0i64));

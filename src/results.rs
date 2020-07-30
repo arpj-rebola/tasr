@@ -1,556 +1,735 @@
 use std::{
 	error::{Error},
-	io::{self},
-	fmt::{self, Display, Formatter, Binary},
+	fmt::{self, Display, Formatter},
 };
+
+use colored::{
+	Colorize,
+};
+
 use crate::{
-	clausedb::{ClauseIndex, ClauseContainer, ChainContainer, WitnessContainer, RawChainContainer},
-	input::{FilePosition},
-	parser::{ParsingError},
-	variable::{Literal, MaybeVariable},
+	basic::{ClauseIndex, ClauseContainer, WitnessContainer},
+	clausedb::{ClauseDb},
+	chaindb::{ChainDb},
+	assignment::{Substitution},
+	input::{SourcePosition},
+	variable::{Literal, MaybeVariable, Variable},
+	logger::{LoggerHandle, LoggerLevel},
+	unitpropagation::{PropagationResult},
 };
 
 #[derive(Debug)]
 pub struct IncorrectCnfStats<T: Display> {
 	found: T,
 	expected: T,
-	pos: FilePosition,
+	pos: SourcePosition,
 }
 
 #[derive(Debug)]
+pub enum SectionError {
+	Missing,
+	Misplaced,
+	Duplicated,
+}
+impl Display for SectionError {
+	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+		match self {
+			SectionError::Missing => write!(f, "missing"),
+			SectionError::Misplaced => write!(f, "misplaced"),
+			SectionError::Duplicated => write!(f, "duplicated"),
+		}
+	}
+}
+
+/// Error structure for `VerificationFailure::MissingCnfSection`, `VerificationFailure::MissingCoreSection`, `VerificationFailure::MissingProofSection`, `VerificationFailure::DuplicatedCnfSection`, `VerificationFailure::DuplicatedCoreSection` and `VerificationFailure::DuplicatedProofSection`.
+#[derive(Debug)]
 pub struct WrongSection {
+	/// Missing or duplicated header string.
 	header: String,
-	pos: FilePosition,
+	/// Position at which a duplicated header is found, or a header is concluded to be missing.
+	format: String,
+	pos: SourcePosition,
+	issue: SectionError,
+}
+
+#[derive(Debug)]
+pub struct ClauseIssues {
+	clause: ClauseContainer,
+	issues: Vec<(Literal, bool)>,
+}
+impl ClauseIssues {
+	pub fn serious(&self) -> bool {
+		self.issues.iter().all(|(_, rep)| *rep)
+	}
+	pub fn is_ok(&self, permissive: bool) -> bool {
+		permissive && !self.serious()
+	}
+}
+
+#[derive(Debug)]
+pub struct ClauseIssuesBuilder(Option<Box<ClauseIssues>>);
+impl ClauseIssuesBuilder {
+	pub fn new() -> ClauseIssuesBuilder {
+		ClauseIssuesBuilder(None)
+	}
+	pub fn set<F>(&mut self, init: F) where
+		F: FnOnce() -> ClauseContainer
+	{
+		if self.0.is_none() {
+			self.0 = Some(Box::new(ClauseIssues {
+				clause: init(),
+				issues: Vec::new(),
+			}));
+		}
+	}
+	pub fn push_literal(&mut self, lit: Literal) {
+		match &mut self.0 {
+			None => (),
+			Some(bx) => bx.clause.0.push(lit),
+		}
+	}
+	pub fn push_issue(&mut self, lit: Literal, rep: bool) {
+		match &mut self.0 {
+			None => (),
+			Some(bx) => bx.issues.push((lit, rep)),
+		}
+	}
+	pub fn is_ok(&self, permissive: bool) -> bool {
+		match &self.0 {
+			None => true,
+			Some(bx) => bx.is_ok(permissive),
+		}
+	}
+	pub fn extract(self) -> Option<Box<ClauseIssues>> {
+		self.0
+	}
 }
 
 #[derive(Debug)]
 pub struct InvalidClause {
-	num: usize,
+	num: (usize, String),
+	pos: SourcePosition,
+	kind: String,
+	format: String,
 	clause: ClauseContainer,
-	pos: FilePosition,
-	issue: Literal,
+	issues: Vec<(Literal, bool)>,
+}
+
+#[derive(Debug)]
+pub struct WitnessIssues {
+	witness: WitnessContainer,
+	issues: Vec<(Variable, Literal, bool)>,
+}
+impl WitnessIssues {
+	pub fn serious(&self) -> bool {
+		self.issues.iter().all(|(_, _, rep)| *rep)
+	}
+	pub fn is_ok(&self, permissive: bool) -> bool {
+		permissive && !self.serious()
+	}
+}
+
+#[derive(Debug)]
+pub struct WitnessIssuesBuilder(Option<Box<WitnessIssues>>);
+impl WitnessIssuesBuilder {
+	pub fn new() -> WitnessIssuesBuilder {
+		WitnessIssuesBuilder(None)
+	}
+	pub fn set<F>(&mut self, init: F) where
+		F: FnOnce() -> WitnessContainer
+	{
+		if self.0.is_none() {
+			self.0 = Some(Box::new(WitnessIssues {
+				witness: init(),
+				issues: Vec::new(),
+			}));
+		}
+	}
+	pub fn push_mapping(&mut self, var: Variable, lit: Literal) {
+		match &mut self.0 {
+			None => (),
+			Some(bx) => bx.witness.0.push((var, lit)),
+		}
+	}
+	pub fn push_issue(&mut self, var: Variable, lit: Literal, rep: bool) {
+		match &mut self.0 {
+			None => (),
+			Some(bx) => bx.issues.push((var, lit, rep)),
+		}
+	}
+	pub fn extract(self) -> Option<Box<WitnessIssues>> {
+		self.0
+	}
 }
 
 #[derive(Debug)]
 pub struct InvalidWitness {
 	num: usize,
+	pos: SourcePosition,
 	witness: WitnessContainer,
-	pos: FilePosition,
+	issues: Vec<(Variable, Literal, bool)>,
+	format: String,
+}
+
+pub struct ChainIssuesBuilder(Option<Box<Vec<(ClauseIndex, bool)>>>);
+impl ChainIssuesBuilder {
+	pub fn new() -> ChainIssuesBuilder {
+		ChainIssuesBuilder(None)
+	}
+	pub fn push_issue(&mut self, lat: ClauseIndex, id: ClauseIndex, rep: bool) {
+		let repp = rep && (lat != id);
+		match &mut self.0 {
+			None => self.0 = Some(Box::new(vec![(lat, repp)])),
+			Some(bx) => bx.push((lat, repp)),
+		}
+	}
+	pub fn extract(self) -> Option<Box<Vec<(ClauseIndex, bool)>>> {
+		self.0
+	}
 }
 
 #[derive(Debug)]
-pub struct ConflictId {
-	num: usize,
-	id: ClauseIndex,
-	clause: ClauseContainer,
-	pos: FilePosition,
+pub struct PropagationIssues {
+	chain: Vec<(ClauseContainer, ClauseIndex, Option<PropagationResult>)>,
+	conflict: bool,
+}
+impl PropagationIssues {
+	fn new(id: ClauseIndex, prop: Vec<PropagationResult>, db: &ClauseDb, chain: &ChainDb) -> Option<PropagationIssues> {
+		let chn = chain.retrieve(id)?;
+		let mut outchain = Vec::new();
+		for cid in chn {
+			outchain.push((db.extract(*cid)?, *cid, None));
+		}
+		let mut conflict = true;
+		for issue in prop {
+			match issue.index() {
+				None => conflict = false,
+				Some(n) => outchain.get_mut(n).as_mut().unwrap().2 = Some(issue),
+			}
+		}
+		Some(PropagationIssues {
+			chain: outchain,
+			conflict: conflict,
+		})
+	}
+	fn serious(&self) -> bool {
+		!self.conflict || self.chain.iter().any(|(_, _, resopt)| match resopt {
+			Some(PropagationResult::Stable) | Some(PropagationResult::Missing(_)) => true,
+			_ => false,
+		})
+	}
 }
 
 #[derive(Debug)]
-pub struct LateralInfo {
-	witness: WitnessContainer,
-	lateral: Option<(ClauseIndex, ClauseContainer)>,
+pub struct PropagationIssuesBuilder(Option<Box<Vec<PropagationResult>>>, Option<Box<Vec<(ClauseIndex, Vec<PropagationResult>)>>>);
+impl PropagationIssuesBuilder {
+	pub fn new() -> PropagationIssuesBuilder {
+		PropagationIssuesBuilder(None, None)
+	}
+	pub fn push_issue(&mut self, res: PropagationResult) {
+		if self.0.is_none() {
+			self.0 = Some(Box::new(Vec::new()));
+		}
+		self.0.as_mut().unwrap().push(res);
+	}
+	pub fn push_chain(&mut self, lat: ClauseIndex) {
+		let tk = self.0.take();
+		match tk {
+			None => (),
+			Some(bx) => {
+				if self.1.is_none() {
+					self.1 = Some(Box::new(Vec::new()));
+				}
+				self.1.as_mut().unwrap().push((lat, *bx));
+			}
+		}
+	}
+	pub fn extract(&mut self, db: &ClauseDb, chain: &ChainDb, subst: &Substitution) -> Option<Box<Vec<(ClauseIndex, PropagationIssues, WitnessContainer)>>> {
+		let tk = self.1.take();
+		match tk {
+			None => None,
+			Some(mut bx) => {
+				let mut out = Box::new(Vec::new());
+				for (lat, prop) in bx.drain(..) {
+					out.push((lat, PropagationIssues::new(lat, prop, db, chain).unwrap(), subst.extract()))
+				}
+				Some(out)
+			}
+		}
+	}
 }
 
 #[derive(Debug)]
 pub struct IncorrectChain {
 	num: usize,
 	clause: ClauseContainer,
-	chain: ChainContainer,
-	issue: Option<ClauseIndex>,
-	issue_clause: Option<ClauseContainer>,
-	lateral: Option<LateralInfo>,
-	pos: FilePosition,
+	chain: PropagationIssues,
+	latid: Option<ClauseIndex>,
+	latclause: ClauseContainer,
+	witness: WitnessContainer,
+	pos: SourcePosition,
+	format: String,
 }
 
 #[derive(Debug)]
-pub struct MissingLateral {
-	num: usize,
+pub struct ConflictId {
+	num: (usize, String),
+	id: ClauseIndex,
 	clause: ClauseContainer,
-	lateral: ClauseIndex,
-	chain: RawChainContainer,
-	pos: FilePosition,
+	pos: SourcePosition,
+	format: String,
+	kind: String,
 }
 
 #[derive(Debug)]
-pub struct RepeatedLateral {
+pub struct InvalidLaterals {
 	num: usize,
+	format: String,
 	clause: ClauseContainer,
-	lateral: (ClauseIndex, ClauseContainer),
-	chains: (RawChainContainer, RawChainContainer),
-	pos: FilePosition,
+	laterals: Vec<(ClauseIndex, bool)>,
+	pos: SourcePosition,
 }
 
 #[derive(Debug)]
 pub struct MissingDeletion {
 	num: usize,
+	format: String,
 	id: ClauseIndex,
-	pos: FilePosition,
+	pos: SourcePosition,
+}
+
+#[derive(Debug)]
+pub struct RefutationError {
+	num: usize,
+	format: String,
+	pos: SourcePosition,
 }
 
 #[derive(Debug)]
 pub enum VerificationFailure {
-	InputError(Box<io::Error>),
-	ParsingError(Box<ParsingError>),
 	IncorrectNumVariables(Box<IncorrectCnfStats<MaybeVariable>>),
 	IncorrectNumClauses(Box<IncorrectCnfStats<usize>>),
-	MissingCnfSection(Box<WrongSection>),
-	DuplicatedCnfSection(Box<WrongSection>),
-	MissingCoreSection(Box<WrongSection>),
-	DuplicatedCoreSection(Box<WrongSection>),
-	MissingProofSection(Box<WrongSection>),
-	DuplicatedProofSection(Box<WrongSection>),
-	PremiseTautology(Box<InvalidClause>),
-	CoreTautology(Box<InvalidClause>),
-	InferenceTautology(Box<InvalidClause>),
-	PremiseRepetition(Box<InvalidClause>),
-	CoreRepetition(Box<InvalidClause>),
-	InferenceRepetition(Box<InvalidClause>),
-	WitnessInconsistency(Box<InvalidWitness>),
-	WitnessRepetition(Box<InvalidWitness>),
-	ConflictCoreId(Box<ConflictId>),
-	ConflictInferenceId(Box<ConflictId>),
+	WrongSection(Box<WrongSection>),
+	InvalidClause(Box<InvalidClause>),
+	UncompliantClause(Box<InvalidClause>),
+	InvalidWitness(Box<InvalidWitness>),
+	UncompliantWitness(Box<InvalidWitness>),
+	ConflictId(Box<ConflictId>),
 	IncorrectCore(Box<ConflictId>),
-	UnchainedRup(Box<IncorrectChain>),
-	NullChainRup(Box<IncorrectChain>),
-	MissingChainRup(Box<IncorrectChain>),
-	UnchainedWsr(Box<IncorrectChain>),
-	NullChainWsr(Box<IncorrectChain>),
-	MissingChainWsr(Box<IncorrectChain>),
-	RepeatedLateral(Box<RepeatedLateral>),
-	MissingLateral(Box<MissingLateral>),
+	IncorrectRup(Box<IncorrectChain>),
+	IncorrectWsr(Box<IncorrectChain>),
+	UncompliantRup(Box<IncorrectChain>),
+	UncompliantWsr(Box<IncorrectChain>),
+	InvalidLaterals(Box<InvalidLaterals>),
 	MissingDeletion(Box<MissingDeletion>),
-	Unrefuted(Box<FilePosition>),
+	Unrefuted(Box<RefutationError>),
 }
 impl VerificationFailure {
-	pub fn incorrect_num_variables(pos: FilePosition, found: MaybeVariable, expected: MaybeVariable) -> VerificationFailure {
+	pub fn incorrect_num_variables(pos: SourcePosition, found: MaybeVariable, expected: MaybeVariable) -> VerificationFailure {
 		VerificationFailure::IncorrectNumVariables(Box::<IncorrectCnfStats<MaybeVariable>>::new(IncorrectCnfStats::<MaybeVariable> {
 			found: found,
 			expected: expected,
 			pos: pos,
 		}))
 	}
-	pub fn incorrect_num_clauses(pos: FilePosition, found: usize, expected: usize) -> VerificationFailure {
+	pub fn incorrect_num_clauses(pos: SourcePosition, found: usize, expected: usize) -> VerificationFailure {
 		VerificationFailure::IncorrectNumClauses(Box::<IncorrectCnfStats<usize>>::new(IncorrectCnfStats::<usize> {
 			found: found,
 			expected: expected,
 			pos: pos,
 		}))
 	}
-	pub fn missing_cnf_section(pos: FilePosition) -> VerificationFailure {
-		VerificationFailure::MissingCnfSection(Box::<WrongSection>::new(WrongSection {
+	pub fn missing_cnf_section(pos: SourcePosition) -> VerificationFailure {
+		VerificationFailure::WrongSection(Box::<WrongSection>::new(WrongSection {
 			pos: pos,
 			header: "cnf".to_string(),
+			format: "CNF".to_string(),
+			issue: SectionError::Missing,
 		}))
 	}
-	pub fn duplicated_cnf_section(pos: FilePosition) -> VerificationFailure {
-		VerificationFailure::DuplicatedCnfSection(Box::<WrongSection>::new(WrongSection {
+	pub fn duplicated_cnf_section(pos: SourcePosition) -> VerificationFailure {
+		VerificationFailure::WrongSection(Box::<WrongSection>::new(WrongSection {
 			pos: pos,
 			header: "cnf".to_string(),
+			format: "CNF".to_string(),
+			issue: SectionError::Duplicated,
 		}))
 	}
-	pub fn missing_core_section(pos: FilePosition) -> VerificationFailure {
-		VerificationFailure::MissingCoreSection(Box::<WrongSection>::new(WrongSection {
+	pub fn missing_core_section(pos: SourcePosition) -> VerificationFailure {
+		VerificationFailure::WrongSection(Box::<WrongSection>::new(WrongSection {
 			pos: pos,
-			header: "asrcore".to_string(),
+			header: "core".to_string(),
+			format: "ASR".to_string(),
+			issue: SectionError::Missing,
 		}))
 	}
-	pub fn duplicated_core_section(pos: FilePosition) -> VerificationFailure {
-		VerificationFailure::DuplicatedCoreSection(Box::<WrongSection>::new(WrongSection {
+	pub fn duplicated_core_section(pos: SourcePosition) -> VerificationFailure {
+		VerificationFailure::WrongSection(Box::<WrongSection>::new(WrongSection {
 			pos: pos,
-			header: "asrcore".to_string(),
+			header: "core".to_string(),
+			format: "ASR".to_string(),
+			issue: SectionError::Duplicated,
 		}))
 	}
-	pub fn missing_proof_section(pos: FilePosition) -> VerificationFailure {
-		VerificationFailure::MissingProofSection(Box::<WrongSection>::new(WrongSection {
+	pub fn misplaced_core_section(pos: SourcePosition) -> VerificationFailure {
+		VerificationFailure::WrongSection(Box::<WrongSection>::new(WrongSection {
 			pos: pos,
-			header: "asrproof".to_string(),
+			header: "core".to_string(),
+			format: "ASR".to_string(),
+			issue: SectionError::Misplaced,
 		}))
 	}
-	pub fn duplicated_proof_section(pos: FilePosition) -> VerificationFailure {
-		VerificationFailure::DuplicatedProofSection(Box::<WrongSection>::new(WrongSection {
+	pub fn missing_proof_section(pos: SourcePosition) -> VerificationFailure {
+		VerificationFailure::WrongSection(Box::<WrongSection>::new(WrongSection {
 			pos: pos,
-			header: "asrproof".to_string(),
+			header: "proof".to_string(),
+			format: "ASR".to_string(),
+			issue: SectionError::Missing,
 		}))
 	}
-	pub fn premise_repetition(pos: FilePosition, num: usize, clause: ClauseContainer, issue: Literal) -> VerificationFailure {
-		VerificationFailure::PremiseRepetition(Box::<InvalidClause>::new(InvalidClause {
+	pub fn duplicated_proof_section(pos: SourcePosition) -> VerificationFailure {
+		VerificationFailure::WrongSection(Box::<WrongSection>::new(WrongSection {
+			pos: pos,
+			header: "proof".to_string(),
+			format: "ASR".to_string(),
+			issue: SectionError::Duplicated,
+		}))
+	}
+	pub fn misplaced_proof_section(pos: SourcePosition) -> VerificationFailure {
+		VerificationFailure::WrongSection(Box::<WrongSection>::new(WrongSection {
+			pos: pos,
+			header: "proof".to_string(),
+			format: "ASR".to_string(),
+			issue: SectionError::Misplaced,
+		}))
+	}
+	fn invalid_clause(pos: SourcePosition, num: usize, issues: Box<ClauseIssues>, format: &str, kind: &str, numbering: &str) -> VerificationFailure {
+		let serious = issues.serious();
+		let bx = Box::<InvalidClause>::new(InvalidClause {
+			num: (num, numbering.to_string()),
+			pos: pos,
+			kind: kind.to_string(),
+			format: format.to_string(),
+			clause: issues.clause,
+			issues: issues.issues,
+		});
+		if serious {
+			VerificationFailure::InvalidClause(bx)
+		} else {
+			VerificationFailure::UncompliantClause(bx)
+		}
+	}
+	pub fn invalid_premise(pos: SourcePosition, num: usize, issues: Box<ClauseIssues>) -> VerificationFailure {
+		VerificationFailure::invalid_clause(pos, num, issues, "CNF", "premise", "premise")
+	}
+	pub fn invalid_core(pos: SourcePosition, num: usize, issues: Box<ClauseIssues>) -> VerificationFailure {
+		VerificationFailure::invalid_clause(pos, num, issues, "ASR", "core", "core")
+	}
+	pub fn invalid_rup(pos: SourcePosition, num: usize, issues: Box<ClauseIssues>) -> VerificationFailure {
+		VerificationFailure::invalid_clause(pos, num, issues, "ASR", "RUP inference", "inference")
+	}
+	pub fn invalid_wsr(pos: SourcePosition, num: usize, issues: Box<ClauseIssues>) -> VerificationFailure {
+		VerificationFailure::invalid_clause(pos, num, issues, "ASR", "WSR inference", "inference")
+	}
+	pub fn invalid_witness(pos: SourcePosition, num: usize, issues: Box<WitnessIssues>) -> VerificationFailure {
+		let serious = issues.serious();
+		let bx = Box::<InvalidWitness>::new(InvalidWitness {
 			num: num,
-			clause: clause,
 			pos: pos,
-			issue: issue,
-		}))
+			witness: issues.witness,
+			issues: issues.issues,
+			format: "ASR".to_string(),
+		});
+		if serious {
+			VerificationFailure::InvalidWitness(bx)
+		} else {
+			VerificationFailure::UncompliantWitness(bx)
+		}
 	}
-	pub fn premise_tautology(pos: FilePosition, num: usize, clause: ClauseContainer, issue: Literal) -> VerificationFailure {
-		VerificationFailure::PremiseTautology(Box::<InvalidClause>::new(InvalidClause {
-			num: num,
-			clause: clause,
-			pos: pos,
-			issue: issue,
-		}))
-	}
-	pub fn core_repetition(pos: FilePosition, num: usize, clause: ClauseContainer, issue: Literal) -> VerificationFailure {
-		VerificationFailure::CoreRepetition(Box::<InvalidClause>::new(InvalidClause {
-			num: num,
-			clause: clause,
-			pos: pos,
-			issue: issue,
-		}))
-	}
-	pub fn core_tautology(pos: FilePosition, num: usize, clause: ClauseContainer, issue: Literal) -> VerificationFailure {
-		VerificationFailure::CoreTautology(Box::<InvalidClause>::new(InvalidClause {
-			num: num,
-			clause: clause,
-			pos: pos,
-			issue: issue,
-		}))
-	}
-	pub fn inference_repetition(pos: FilePosition, num: usize, clause: ClauseContainer, issue: Literal) -> VerificationFailure {
-		VerificationFailure::InferenceRepetition(Box::<InvalidClause>::new(InvalidClause {
-			num: num,
-			clause: clause,
-			pos: pos,
-			issue: issue,
-		}))
-	}
-	pub fn inference_tautology(pos: FilePosition, num: usize, clause: ClauseContainer, issue: Literal) -> VerificationFailure {
-		VerificationFailure::InferenceTautology(Box::<InvalidClause>::new(InvalidClause {
-			num: num,
-			clause: clause,
-			pos: pos,
-			issue: issue,
-		}))
-	}
-	pub fn witness_repetition(pos: FilePosition, num: usize, witness: WitnessContainer) -> VerificationFailure {
-		VerificationFailure::WitnessRepetition(Box::<InvalidWitness>::new(InvalidWitness {
-			num: num,
-			witness: witness,
-			pos: pos,
-		}))
-	}
-	pub fn witness_inconsistency(pos: FilePosition, num: usize, witness: WitnessContainer) -> VerificationFailure {
-		VerificationFailure::WitnessInconsistency(Box::<InvalidWitness>::new(InvalidWitness {
-			num: num,
-			witness: witness,
-			pos: pos,
-		}))
-	}
-	pub fn conflict_core_id(pos: FilePosition, num: usize, id: ClauseIndex, clause: ClauseContainer) -> VerificationFailure {
-		VerificationFailure::ConflictCoreId(Box::<ConflictId>::new(ConflictId {
-			num: num,
+	pub fn conflict_id(pos: SourcePosition, num: usize, id: ClauseIndex, clause: ClauseContainer, format: &str, kind: &str, numbering: &str) -> VerificationFailure {
+		VerificationFailure::ConflictId(Box::<ConflictId>::new(ConflictId {
+			num: (num, numbering.to_string()),
 			id: id,
 			clause: clause,
 			pos: pos,
+			format: format.to_string(),
+			kind: kind.to_string(),
 		}))
 	}
-	pub fn conflict_inference_id(pos: FilePosition, num: usize, id: ClauseIndex, clause: ClauseContainer) -> VerificationFailure {
-		VerificationFailure::ConflictInferenceId(Box::<ConflictId>::new(ConflictId {
-			num: num,
-			id: id,
-			clause: clause,
-			pos: pos,
-		}))
+	pub fn conflict_core_id(pos: SourcePosition, num: usize, id: ClauseIndex, clause: ClauseContainer) -> VerificationFailure {
+		VerificationFailure::conflict_id(pos, num, id, clause, "ASR", "core", "core")
 	}
-	pub fn incorrect_core(pos: FilePosition, num: usize, id: ClauseIndex, clause: ClauseContainer) -> VerificationFailure {
+	pub fn conflict_rup_id(pos: SourcePosition, num: usize, id: ClauseIndex, clause: ClauseContainer) -> VerificationFailure {
+		VerificationFailure::conflict_id(pos, num, id, clause, "ASR", "RUP inference", "inference")
+	}
+	pub fn conflict_wsr_id(pos: SourcePosition, num: usize, id: ClauseIndex, clause: ClauseContainer) -> VerificationFailure {
+		VerificationFailure::conflict_id(pos, num, id, clause, "ASR", "WSR inference", "inference")
+	}
+	pub fn incorrect_core(pos: SourcePosition, num: usize, id: ClauseIndex, clause: ClauseContainer) -> VerificationFailure {
 		VerificationFailure::IncorrectCore(Box::<ConflictId>::new(ConflictId {
-			num: num,
+			num: (num, "".to_string()),
 			id: id,
 			clause: clause,
 			pos: pos,
+			format: "ASR".to_string(),
+			kind: "core".to_string(),
 		}))
 	}
-	pub fn unchained_rup(pos: FilePosition, num: usize, clause: ClauseContainer, chain: ChainContainer) -> VerificationFailure {
-		VerificationFailure::UnchainedRup(Box::<IncorrectChain>::new(IncorrectChain {
+	pub fn incorrect_rup(pos: SourcePosition, num: usize, clause: ClauseContainer, chain: PropagationIssues) -> VerificationFailure {
+		let serious = chain.serious();
+		let bx = Box::<IncorrectChain>::new(IncorrectChain {
 			num: num,
 			clause: clause,
 			chain: chain,
-			issue: None,
-			issue_clause: None,
-			lateral: None,
+			latid: None,
+			latclause: ClauseContainer(Vec::new()),
+			witness: WitnessContainer(Vec::new()),
 			pos: pos,
-		}))
+			format: "ASR".to_string(),
+		});
+		if serious {
+			VerificationFailure::IncorrectRup(bx)
+		} else {
+			VerificationFailure::UncompliantRup(bx)
+		}
 	}
-	pub fn null_rup(pos: FilePosition, num: usize, clause: ClauseContainer, issueid: ClauseIndex, issueclause: ClauseContainer, chain: ChainContainer) -> VerificationFailure {
-		VerificationFailure::NullChainRup(Box::<IncorrectChain>::new(IncorrectChain {
+	pub fn incorrect_wsr(pos: SourcePosition, num: usize, clause: ClauseContainer, chain: PropagationIssues, latid: Option<ClauseIndex>, latclause: ClauseContainer, witness: WitnessContainer) -> VerificationFailure {
+		let serious = chain.serious();
+		let bx = Box::<IncorrectChain>::new(IncorrectChain {
 			num: num,
 			clause: clause,
 			chain: chain,
-			issue: Some(issueid),
-			issue_clause: Some(issueclause),
-			lateral: None,
+			latid: latid,
+			latclause: latclause,
+			witness: witness,
 			pos: pos,
-		}))
+			format: "ASR".to_string(),
+		});
+		if serious {
+			VerificationFailure::IncorrectWsr(bx)
+		} else {
+			VerificationFailure::UncompliantWsr(bx)
+		}
 	}
-	pub fn missing_rup(pos: FilePosition, num: usize, clause: ClauseContainer, issueid: ClauseIndex, chain: ChainContainer) -> VerificationFailure {
-		VerificationFailure::MissingChainRup(Box::<IncorrectChain>::new(IncorrectChain {
+	pub fn invalid_laterals(pos: SourcePosition, num: usize, clause: ClauseContainer, lats: Box<Vec<(ClauseIndex, bool)>>) -> VerificationFailure {
+		VerificationFailure::InvalidLaterals(Box::<InvalidLaterals>::new(InvalidLaterals {
 			num: num,
+			format: "ASR".to_string(),
 			clause: clause,
-			chain: chain,
-			issue: Some(issueid),
-			issue_clause: None,
-			lateral: None,
+			laterals: *lats,
 			pos: pos,
 		}))
 	}
-	pub fn unchained_sr(pos: FilePosition, num: usize, clause: ClauseContainer, lat: Option<(ClauseIndex, ClauseContainer)>, witness: WitnessContainer, chain: ChainContainer) -> VerificationFailure {
-		VerificationFailure::UnchainedWsr(Box::<IncorrectChain>::new(IncorrectChain {
-			num: num,
-			clause: clause,
-			chain: chain,
-			issue: None,
-			issue_clause: None,
-			lateral: Some(LateralInfo {
-				witness: witness,
-				lateral: lat,
-			}),
-			pos: pos,
-		}))
-	}
-	pub fn null_sr(pos: FilePosition, num: usize, clause: ClauseContainer, lat: Option<(ClauseIndex, ClauseContainer)>, witness: WitnessContainer, issueid: ClauseIndex, issueclause: ClauseContainer, chain: ChainContainer) -> VerificationFailure {
-		VerificationFailure::NullChainWsr(Box::<IncorrectChain>::new(IncorrectChain {
-			num: num,
-			clause: clause,
-			chain: chain,
-			issue: Some(issueid),
-			issue_clause: Some(issueclause),
-			lateral: Some(LateralInfo {
-				witness: witness,
-				lateral: lat,
-			}),
-			pos: pos,
-		}))
-	}
-	pub fn missing_sr(pos: FilePosition, num: usize, clause: ClauseContainer, lat: Option<(ClauseIndex, ClauseContainer)>, witness: WitnessContainer, issueid: ClauseIndex, chain: ChainContainer) -> VerificationFailure {
-		VerificationFailure::MissingChainWsr(Box::<IncorrectChain>::new(IncorrectChain {
-			num: num,
-			clause: clause,
-			chain: chain,
-			issue: Some(issueid),
-			issue_clause: None,
-			lateral: Some(LateralInfo {
-				witness: witness,
-				lateral: lat,
-			}),
-			pos: pos,
-		}))
-	}
-	pub fn missing_lateral_sr(pos: FilePosition, num: usize, clause: ClauseContainer, latid: ClauseIndex, chain: RawChainContainer) -> VerificationFailure {
-		VerificationFailure::MissingLateral(Box::<MissingLateral>::new(MissingLateral {
-			num: num,
-			clause: clause,
-			lateral: latid,
-			chain: chain,
-			pos: pos,
-		}))
-	}
-	pub fn repeated_lateral_sr(pos: FilePosition, num: usize, clause: ClauseContainer, latid: ClauseIndex, latclause: ClauseContainer, chain1: RawChainContainer, chain2: RawChainContainer) -> VerificationFailure {
-		VerificationFailure::RepeatedLateral(Box::<RepeatedLateral>::new(RepeatedLateral {
-			num: num,
-			clause: clause,
-			lateral: (latid, latclause),
-			chains: (chain1, chain2),
-			pos: pos,
-		}))
-	}
-	pub fn missing_deletion(pos: FilePosition, num: usize, id: ClauseIndex) -> VerificationFailure {
+	pub fn missing_deletion(pos: SourcePosition, num: usize, id: ClauseIndex) -> VerificationFailure {
 		VerificationFailure::MissingDeletion(Box::<MissingDeletion>::new(MissingDeletion {
 			num: num,
 			id: id,
 			pos: pos,
+			format: "ASR".to_string(),
 		}))
 	}
-	pub fn unrefuted(pos: FilePosition) -> VerificationFailure {
-		VerificationFailure::Unrefuted(Box::<FilePosition>::new(pos))
+	pub fn unrefuted(pos: SourcePosition, num: usize) -> VerificationFailure {
+		VerificationFailure::Unrefuted(Box::<RefutationError>::new(RefutationError {
+			num: num,
+			format: "ASR".to_string(),
+			pos: pos,
+		}))
 	}
-	pub fn failure(&self) -> bool {
+	pub fn serious(&self) -> bool {
 		match self {
-			VerificationFailure::IncorrectCore(_) |
-			VerificationFailure::UnchainedRup(_) |
-			VerificationFailure::NullChainRup(_) |
-			VerificationFailure::MissingChainRup(_) |
-			VerificationFailure::UnchainedWsr(_) |
-			VerificationFailure::NullChainWsr(_) |
-			VerificationFailure::MissingChainWsr(_) |
-			VerificationFailure::Unrefuted(_) => true,
-			_ => false,
-		}
-	}
-	pub fn binary(&self, cnfbin: bool, asrbin: bool) -> bool {
-		match self {
-			VerificationFailure::InputError(_) => false,
-			VerificationFailure::ParsingError(bx) => if bx.file_format() == "CNF" {
-				cnfbin
-			} else if bx.file_format() == "ASR" {
-				asrbin
-			} else {
-				panic!("Unrecognized format")
-			},
 			VerificationFailure::IncorrectNumVariables(_) |
 			VerificationFailure::IncorrectNumClauses(_) |
-			VerificationFailure::MissingCnfSection(_) |
-			VerificationFailure::DuplicatedCnfSection(_) |
-			VerificationFailure::PremiseTautology(_) |
-			VerificationFailure::PremiseRepetition(_) => cnfbin,
-			VerificationFailure::MissingCoreSection(_) |
-			VerificationFailure::DuplicatedCoreSection(_) |
-			VerificationFailure::MissingProofSection(_) |
-			VerificationFailure::DuplicatedProofSection(_) |
-			VerificationFailure::CoreTautology(_) |
-			VerificationFailure::InferenceTautology(_) |
-			VerificationFailure::CoreRepetition(_) |
-			VerificationFailure::InferenceRepetition(_) |
-			VerificationFailure::WitnessInconsistency(_) |
-			VerificationFailure::WitnessRepetition(_) |
-			VerificationFailure::ConflictCoreId(_) |
-			VerificationFailure::ConflictInferenceId(_) |
-			VerificationFailure::IncorrectCore(_) |
-			VerificationFailure::UnchainedRup(_) |
-			VerificationFailure::NullChainRup(_) |
-			VerificationFailure::MissingChainRup(_) |
-			VerificationFailure::UnchainedWsr(_) |
-			VerificationFailure::NullChainWsr(_) |
-			VerificationFailure::MissingChainWsr(_) |
-			VerificationFailure::MissingLateral(_) |
-			VerificationFailure::RepeatedLateral(_) |
+			VerificationFailure::WrongSection(_) |
+			VerificationFailure::UncompliantClause(_) |
+			VerificationFailure::UncompliantWitness(_) |
 			VerificationFailure::MissingDeletion(_) |
-			VerificationFailure::Unrefuted(_) => asrbin
+			VerificationFailure::UncompliantRup(_) |
+			VerificationFailure::InvalidLaterals(_) |
+			VerificationFailure::UncompliantWsr(_) => false,
+			VerificationFailure::InvalidClause(_) |
+			VerificationFailure::InvalidWitness(_) |
+			VerificationFailure::ConflictId(_) |
+			VerificationFailure::IncorrectCore(_) |
+			VerificationFailure::Unrefuted(_) |
+			VerificationFailure::IncorrectRup(_) |
+			VerificationFailure::IncorrectWsr(_) => true,
 		}
-	}
-}
-impl From<io::Error> for VerificationFailure {
-	fn from(err: io::Error) -> VerificationFailure {
-		VerificationFailure::InputError(Box::<io::Error>::new(err))
-	}
-}
-impl From<ParsingError> for VerificationFailure {
-	fn from(err: ParsingError) -> VerificationFailure {
-		VerificationFailure::ParsingError(Box::<ParsingError>::new(err))
 	}
 }
 impl Display for VerificationFailure {
 	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
 		match self {
-			VerificationFailure::InputError(bx) => write!(f, "{}", &**bx),
-			VerificationFailure::ParsingError(bx) => write!(f, "{}", &**bx),
-			VerificationFailure::IncorrectNumVariables(bx) => write!(f, "Incorrect declared number of variables in CNF file {}:\nDeclared {} variables, found {}.", &bx.pos, &bx.expected, &bx.found),
-			VerificationFailure::IncorrectNumClauses(bx) => write!(f, "Incorrect declared number of clauses in CNF file {}:\nDeclared {} clauses, found {}.", &bx.pos, &bx.expected, &bx.found),
-			VerificationFailure::MissingCnfSection(bx) => write!(f, "Missing section in CNF file {}:\nCould not find section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::DuplicatedCnfSection(bx) => write!(f, "Duplicated section in CNF file {}:\nFound duplicated section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::MissingCoreSection(bx) => write!(f, "Missing section in ASR file {}:\nCould not find section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::DuplicatedCoreSection(bx) => write!(f, "Duplicated section in ASR file {}:\nFound duplicated section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::MissingProofSection(bx) => write!(f, "Missing section in ASR file {}:\nCould not find section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::DuplicatedProofSection(bx) => write!(f, "Duplicated section in ASR file {}:\nFound duplicated section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::PremiseTautology(bx) => write!(f, "Tautological premise clause found in CNF file {}:\nClause {} on formula entry {} contains complementary literals {} and {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue, bx.issue.complement()),
-			VerificationFailure::CoreTautology(bx) => write!(f, "Tautological core clause found in ASR file {}:\nClause {} on core entry {} contains complementary literals {} and {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue, bx.issue.complement()),
-			VerificationFailure::InferenceTautology(bx) => write!(f, "Tautological inference clause found in ASR file {}:\nClause {} on proof instruction {} contains complementary literals {} and {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue, bx.issue.complement()),
-			VerificationFailure::PremiseRepetition(bx) => write!(f, "Repeated literal found in premise clause in CNF file {}:\nClause {} on formula entry {} contains a repeated literal {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue),
-			VerificationFailure::CoreRepetition(bx) => write!(f, "Repeated literal found in core clause in ASR file {}:\nClause {} on core entry {} contains a repeated literal {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue),
-			VerificationFailure::InferenceRepetition(bx) => write!(f, "Repeated literal found in inference clause in ASR file {}:\nClause {} on proof instruction {} contains a repeated literal {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue),
-			VerificationFailure::WitnessInconsistency(bx) => write!(f, "Inconsistent witness found in ASR file: {}:\nWitness {} in the SR inference on proof instruction {} contains inconsistent mappings.", &bx.pos, &bx.witness, &bx.num),
-			VerificationFailure::WitnessRepetition(bx) => write!(f, "Redundant witness mapping found in ASR file: {}:\nWitness {} in the SR inference on proof instruction {} contains redundant mappings.", &bx.pos, &bx.witness, &bx.num),
-			VerificationFailure::ConflictCoreId(bx) => write!(f, "Conflicting core clause identifier found in ASR file: {}:\nCore entry {} has identifier {}, but that identifier is already in use for clause {}.", &bx.pos, &bx.num, &bx.id, &bx.clause),
-			VerificationFailure::ConflictInferenceId(bx) => write!(f, "Conflicting inferred clause identifier found in ASR file: {}:\nProof instruction {} has identifier {}, but that identifier is already in use for clause {}.", &bx.pos, &bx.num, &bx.id, &bx.clause),
-			VerificationFailure::IncorrectCore(bx) => write!(f, "Incorrect core entry in ASR file {}:\nCore entry {} introduces clause {}, but this clause does not occur in the CNF formula.", &bx.pos, &bx.num, &bx.clause),
-			VerificationFailure::UnchainedRup(bx) => write!(f, "Incorrect RUP inference in ASR file {}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}but propagation does not produce a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.chain),
-			VerificationFailure::NullChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.as_ref().unwrap(), &bx.issue_clause.as_ref().unwrap()),
-			VerificationFailure::MissingChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause identifier is {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.as_ref().unwrap()),
-			VerificationFailure::UnchainedWsr(bx) => {
-				write!(f, "Incorrect SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
-				match &bx.lateral.as_ref().unwrap().lateral {
-					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
-					None => write!(f, " the clause itself")?,
-				}
-				write!(f, ", but propagation does not produce a contradiction.")
+			VerificationFailure::IncorrectNumVariables(bx) => {
+				write!(f, "{}", "Incorrect declared number of variables\n".white().bold())?;
+				write!(f, "{}{} (CNF format)\n", "  -> ".blue(), &bx.pos)?;
+				write!(f, "\tDeclared {} variables in CNF header, found {}.\n", &bx.expected, &bx.found)
 			},
-			VerificationFailure::NullChainWsr(bx) => {
-				write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
-				match &bx.lateral.as_ref().unwrap().lateral {
-					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
-					None => write!(f, " the clause itself")?,
-				}
-				write!(f, ". The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.issue.as_ref().unwrap(), &bx.issue_clause.as_ref().unwrap())
+			VerificationFailure::IncorrectNumClauses(bx) => {
+				write!(f, "{}", "Incorrect declared number of clauses\n".white().bold())?;
+				write!(f, "{}{} (CNF format)\n", "  -> ".blue(), &bx.pos)?;
+				write!(f, "\tDeclared {} clauses in CNF header, found {}.\n", &bx.expected, &bx.found)
 			},
-			VerificationFailure::MissingChainWsr(bx) => {
-				write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
-				match &bx.lateral.as_ref().unwrap().lateral {
-					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
-					None => write!(f, " the clause itself")?,
-				}
-				write!(f, ". The next propagation clause identifier is {} but no clause is associated to this identifier.", &bx.issue.as_ref().unwrap())
+			VerificationFailure::WrongSection(bx) => {
+				write!(f, "{}", "Invalid section\n".white().bold())?;
+				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "\tSection header '{}' is {}.\n", &bx.header, &bx.issue)
 			},
-			VerificationFailure::MissingLateral(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference. The subchain {} is given for clause identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.lateral),
-			VerificationFailure::RepeatedLateral(bx) => write!(f, "Invalid SR inference in ASR file {}:\nProof instruction {} introduces clause {} as an SR inference. Two subchains {} and {} are given for the same clause identifier {}: {}.", &bx.pos, &bx.num, &bx.clause, &bx.chains.0, &bx.chains.1, &bx.lateral.0, &bx.lateral.1),
-			VerificationFailure::MissingDeletion(bx) => write!(f, "Invalid deletion instruction in ASR file {}:\nProof instruction {} deletes the clause with identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.id),
-			VerificationFailure::Unrefuted(bx) => write!(f, "Invalid proof in ASR file {}:\nThe proof does not derive the empty clause at any point.", &**bx),
-		}
-	}
-}
-impl Binary for VerificationFailure {
-	fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-		match self {
-			VerificationFailure::InputError(bx) => write!(f, "{}", &**bx),
-			VerificationFailure::ParsingError(bx) => write!(f, "{:b}", &**bx),
-			VerificationFailure::IncorrectNumVariables(bx) => write!(f, "Incorrect declared number of variables in CNF file {:b}:\nDeclared {} variables, found {}.", &bx.pos, &bx.expected, &bx.found),
-			VerificationFailure::IncorrectNumClauses(bx) => write!(f, "Incorrect declared number of clauses in CNF file {:b}:\nDeclared {} clauses, found {}.", &bx.pos, &bx.expected, &bx.found),
-			VerificationFailure::MissingCnfSection(bx) => write!(f, "Missing section in CNF file {:b}:\nCould not find section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::DuplicatedCnfSection(bx) => write!(f, "Duplicated section in CNF file {:b}:\nFound duplicated section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::MissingCoreSection(bx) => write!(f, "Missing section in ASR file {:b}:\nCould not find section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::DuplicatedCoreSection(bx) => write!(f, "Duplicated section in ASR file {:b}:\nFound duplicated section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::MissingProofSection(bx) => write!(f, "Missing section in ASR file {:b}:\nCould not find section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::DuplicatedProofSection(bx) => write!(f, "Duplicated section in ASR file {:b}:\nFound duplicated section header '{}'.", &bx.pos, &bx.header),
-			VerificationFailure::PremiseTautology(bx) => write!(f, "Tautological premise clause found in CNF file {:b}:\nClause {} on formula entry {} contains complementary literals {} and {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue, bx.issue.complement()),
-			VerificationFailure::CoreTautology(bx) => write!(f, "Tautological core clause found in ASR file {:b}:\nClause {} on core entry {} contains complementary literals {} and {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue, bx.issue.complement()),
-			VerificationFailure::InferenceTautology(bx) => write!(f, "Tautological inference clause found in ASR file {:b}:\nClause {} on proof instruction {} contains complementary literals {} and {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue, bx.issue.complement()),
-			VerificationFailure::PremiseRepetition(bx) => write!(f, "Repeated literal found in premise clause in CNF file {:b}:\nClause {} on formula entry {} contains a repeated literal {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue),
-			VerificationFailure::CoreRepetition(bx) => write!(f, "Repeated literal found in core clause in ASR file {:b}:\nClause {} on core entry {} contains a repeated literal {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue),
-			VerificationFailure::InferenceRepetition(bx) => write!(f, "Repeated literal found in inference clause in ASR file {:b}:\nClause {} on proof instruction {} contains a repeated literal {}.", &bx.pos, &bx.clause, &bx.num, &bx.issue),
-			VerificationFailure::WitnessInconsistency(bx) => write!(f, "Inconsistent witness found in ASR file: {}:\nWitness {} in the SR inference on proof instruction {} contains inconsistent mappings.", &bx.pos, &bx.witness, &bx.num),
-			VerificationFailure::WitnessRepetition(bx) => write!(f, "Redundant witness mapping found in ASR file: {}:\nWitness {} in the SR inference on proof instruction {} contains redundant mappings.", &bx.pos, &bx.witness, &bx.num),
-			VerificationFailure::ConflictCoreId(bx) => write!(f, "Conflicting core clause identifier found in ASR file: {}:\nCore entry {} has identifier {}, but that identifier is already in use for clause {}.", &bx.pos, &bx.num, &bx.id, &bx.clause),
-			VerificationFailure::ConflictInferenceId(bx) => write!(f, "Conflicting inferred clause identifier found in ASR file: {}:\nProof instruction {} has identifier {}, but that identifier is already in use for clause {}.", &bx.pos, &bx.num, &bx.id, &bx.clause),
-			VerificationFailure::IncorrectCore(bx) => write!(f, "Incorrect core entry in ASR file {:b}:\nCore entry {} introduces clause {}, but this clause does not occur in the CNF formula.", &bx.pos, &bx.num, &bx.clause),
-			VerificationFailure::UnchainedRup(bx) => write!(f, "Incorrect RUP inference in ASR file {:b}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}but propagation does not produce a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.chain),
-			VerificationFailure::NullChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {:b}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.as_ref().unwrap(), &bx.issue_clause.as_ref().unwrap()),
-			VerificationFailure::MissingChainRup(bx) => write!(f, "Invalid RUP inference in ASR file {:b}:\nProof instruction {} introduces clause {} as a RUP inference through the unit propagation chain:\n{}The next propagation clause identifier is {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.issue.as_ref().unwrap()),
-			VerificationFailure::UnchainedWsr(bx) => {
-				write!(f, "Incorrect SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
-				match &bx.lateral.as_ref().unwrap().lateral {
-					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
-					None => write!(f, " the clause itself")?,
+			VerificationFailure::InvalidClause(bx) | VerificationFailure::UncompliantClause(bx) => {
+				write!(f, "{}{}{}\n", "Invalid ".white().bold(), format!("{}", &bx.kind).white().bold(), " clause".white().bold())?;
+				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "\tClause {} at {} position #{} is invalid because:\n", format!("{}", &bx.clause).bold().yellow(), &bx.num.1, &bx.num.0)?;
+				for (lit, rep) in &bx.issues {
+					if *rep {
+						write!(f, "\t  Literal {} is repeated.\n", lit)?;
+					} else {
+						write!(f, "\t  Literal {} is inconsistent with literal {}.\n", lit, lit.complement())?;
+					}
 				}
-				write!(f, ", but propagation does not produce a contradiction.")
+				Ok(())
 			},
-			VerificationFailure::NullChainWsr(bx) => {
-				write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
-				match &bx.lateral.as_ref().unwrap().lateral {
-					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
-					None => write!(f, " the clause itself")?,
+			VerificationFailure::InvalidWitness(bx) | VerificationFailure::UncompliantWitness(bx) => {
+				write!(f, "{}\n", "Invalid WSR witness".white().bold())?;
+				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "\tWitness {} for WSR inference at inference position #{} is invalid because:\n", format!("{}", &bx.witness).bold().magenta(), &bx.num)?;
+				for (var, lit, rep) in &bx.issues {
+					if *rep {
+						write!(f, "\t  Mapping {} -> {} is repeated.\n", var, lit)?;
+					} else {
+						write!(f, "\t  Mapping {} -> {} is inconsistent with a previous mapping.\n", var, lit)?;
+					}
 				}
-				write!(f, ". The next propagation clause is {}: {}, but this clause does not produce a propagation nor a contradiction.", &bx.issue.as_ref().unwrap(), &bx.issue_clause.as_ref().unwrap())
+				Ok(())
 			},
-			VerificationFailure::MissingChainWsr(bx) => {
-				write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference upon the witness mapping {}. The unit propagation chain:\n{} is given for", &bx.pos, &bx.num, &bx.clause, &bx.lateral.as_ref().unwrap().witness, &bx.chain)?;
-				match &bx.lateral.as_ref().unwrap().lateral {
-					Some((latid, latcls)) => write!(f, " clause {}: {}", latid, latcls)?,
-					None => write!(f, " the clause itself")?,
+			VerificationFailure::ConflictId(bx) => {
+				write!(f, "{}\n", "Conflicting clause identifier".white().bold())?;
+				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "\tA clause is introduced as a {} with clause identifier {} at {} position #{}", &bx.kind, &bx.id, &bx.num.1, &bx.num.0)?;
+				write!(f, ", but clause {} was already assigned that identifier.\n", format!("{}", &bx.clause).bold().yellow())
+			},
+			VerificationFailure::IncorrectCore(bx) => {
+				write!(f, "{}\n", "Incorrect core introduction".white().bold())?;
+				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "\tThe clause {} is introduced as a core clause ", format!("{}", &bx.clause).bold().yellow())?;
+				write!(f, "with clause identifier {} at core position #{}, but was not found among the premises.\n", &bx.id, &bx.num.0)
+			},
+			VerificationFailure::IncorrectRup(bx) | VerificationFailure::UncompliantRup(bx) => {
+				write!(f, "{}\n", "Incorrect RUP introduction".white().bold())?;
+				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "\tThe clause {} is introduced as a RUP inference clause ", format!("{}", &bx.clause).bold().yellow())?;
+				write!(f, "at inference position #{}, but the specified unit propagation chain is invalid because:", &bx.num)?;
+				if bx.chain.chain.is_empty() {
+					write!(f, "(empty)\n")?;
+				} else {
+					for (clause, id, resopt) in &bx.chain.chain {
+						write!(f, "\t  {}: {}  ", id, format!("{}", clause).yellow())?;
+						match resopt {
+							Some(PropagationResult::Missing(_)) => write!(f, "clause is missing from currently derived formula\n")?,
+							Some(PropagationResult::Null(_)) => write!(f, "clause does not propagate a literal or produce a conflict\n")?,
+							Some(PropagationResult::Done(_)) => write!(f, "conflict was already reached\n")?,
+							_ => write!(f, "\n")?,
+						}
+					}
 				}
-				write!(f, ". The next propagation clause identifier is {} but no clause is associated to this identifier.", &bx.issue.as_ref().unwrap())
+				if !bx.chain.conflict {
+					write!(f, "a conflict is not reached\n")?;
+				}
+				Ok(())
 			},
-			VerificationFailure::MissingLateral(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference. The subchain {} is given for clause identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.clause, &bx.chain, &bx.lateral),
-			VerificationFailure::RepeatedLateral(bx) => write!(f, "Invalid SR inference in ASR file {:b}:\nProof instruction {} introduces clause {} as an SR inference. Two subchains {} and {} are given for the same clause identifier {}: {}.", &bx.pos, &bx.num, &bx.clause, &bx.chains.0, &bx.chains.1, &bx.lateral.0, &bx.lateral.1),
-			VerificationFailure::MissingDeletion(bx) => write!(f, "Invalid deletion instruction in ASR file {:b}:\nProof instruction {} deletes the clause with identifier {}, but no clause is associated to this identifier.", &bx.pos, &bx.num, &bx.id),
-			VerificationFailure::Unrefuted(bx) => write!(f, "Invalid proof in ASR file {:b}:\nThe proof does not derive the empty clause at any point.", &**bx),
+			VerificationFailure::IncorrectWsr(bx) | VerificationFailure::UncompliantWsr(bx) => {
+				write!(f, "{}\n", "Incorrect WSR introduction".white().bold())?;
+				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "\tThe clause {} is introduced as a WSR inference clause ", format!("{}", &bx.clause).bold().yellow())?;
+				write!(f, "upon the witness {} ", format!("{}", &bx.witness).bold().magenta())?;
+				write!(f, "at inference position #{}. The unit propagation chain for the ", &bx.num)?;
+				match &bx.latid {
+					Some(id) => write!(f, "{}: {} ", id, format!("{}", &bx.latclause).bold().yellow())?,
+					None => write!(f, "clause itself ")?,
+				}
+				write!(f, "is invalid because:")?;
+				if bx.chain.chain.is_empty() {
+					write!(f, "(empty)\n")?;
+				} else {
+					for (clause, id, resopt) in &bx.chain.chain {
+						write!(f, "\t  {}: {}  ", id, format!("{}", clause).yellow())?;
+						match resopt {
+							Some(PropagationResult::Missing(_)) => write!(f, "clause is missing from currently derived formula\n")?,
+							Some(PropagationResult::Null(_)) => write!(f, "clause does not propagate a literal or produce a conflict\n")?,
+							Some(PropagationResult::Done(_)) => write!(f, "conflict was already reached\n")?,
+							_ => write!(f, "\n")?,
+						}
+					}
+				}
+				if !bx.chain.conflict {
+					write!(f, "a conflict is not reached\n")?;
+				}
+				Ok(())
+			},
+			VerificationFailure::InvalidLaterals(bx) => {
+				write!(f, "{}\n", "Invalid lateral chains in WSR inference".white().bold())?;
+				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "\tThe clause {} is introduced as a WSR inference clause ", format!("{}", &bx.clause).bold().yellow())?;
+				write!(f, "at inference position #{}, but the unit propagation chains for the following laterals are invalid:\n", &bx.num)?;
+				for (id, rep) in &bx.laterals {
+					if *rep {
+						write!(f, "\t  {}: another unit propagation chain exists for this lateral clause\n", id)?;
+					} else {
+						write!(f, "\t  {}: no clause occurs in the currently derived formula with this clause identifier\n", id)?;
+					}
+				}
+				Ok(())
+			},
+			VerificationFailure::MissingDeletion(bx) => {
+				write!(f, "{}\n", "Missing clause deletion".white().bold())?;
+				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "\tThe deletion instruction at inference position #{} ", &bx.num)?;
+				write!(f, "deletes a clause with clause identifier {}, which does not occur in the currently derived formula.\n", &bx.id)
+			},
+			VerificationFailure::Unrefuted(bx) => {
+				write!(f, "{}\n", "Unrefuted derivation".white().bold())?;
+				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "\tNo empty clause occurs in the derived formula at the end of the derivation, after inference position #{}.\n", &bx.num)
+			},
 		}
 	}
 }
 impl Error for VerificationFailure {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-		match self {
-			VerificationFailure::InputError(bx) => Some(bx),
-			VerificationFailure::ParsingError(bx) => Some(bx),
-			_ => None,
-		}
+		None
     }
 }
 
+
 pub type VerificationResult<T> = Result<T, VerificationFailure>;
+
+pub struct ErrorStorage {
+	vec: Vec<VerificationFailure>,
+	permissive: bool,
+}
+impl ErrorStorage {
+	pub fn new(permissive: bool) -> ErrorStorage {
+		ErrorStorage {
+			vec: Vec::new(),
+			permissive: permissive,
+		}
+	}
+	pub fn push_error(&mut self, handle: LoggerHandle<'_, '_>, error: VerificationFailure) {
+		if self.permissive && !error.serious() {
+			log_warning!(handle, target: "Warning"; "{}", &error);
+		} else {
+			log_error!(handle, target: "Error"; "{}", &error);
+		}
+		self.vec.push(error);
+	}
+	pub fn count(&self) -> (usize, usize) {
+		let mut warnings = 0usize;
+		let mut errors = 0usize;
+		for err in &self.vec {
+			if self.permissive && !err.serious() {
+				warnings += 1usize;
+			} else {
+				errors += 1usize;
+			}
+		}
+		(warnings, errors)
+	}
+}

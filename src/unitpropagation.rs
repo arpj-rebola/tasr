@@ -1,8 +1,10 @@
 use crate::{
     assignment::{InsertionTest, BacktrackBlock, Substitution},
     chaindb::{ChainDb},
-    clausedb::{ClauseDb, ClauseIndex, ClauseReference, WitnessContainer},
+    clausedb::{ClauseDb},
+    basic::{ClauseIndex, WitnessContainer},
     variable::{Literal},
+    results::{PropagationIssuesBuilder, PropagationIssues},
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -24,7 +26,7 @@ impl Propagation {
     pub fn null(&self) -> bool {
         self.lit == Literal::Top
     }
-    pub fn propagate<'a>(rf: &ClauseReference<'a>, block: &BacktrackBlock) -> Propagation {
+    pub fn propagate<'a, R: IntoIterator<Item = &'a Literal>>(rf: R, block: &BacktrackBlock) -> Propagation {
         let mut prop = Propagation { lit: Literal::Bottom };
         for &lit in rf {
 			match (block.test(lit), prop.lit) {
@@ -37,48 +39,30 @@ impl Propagation {
     }
 }
 
-pub struct PropagationError {
-    pub result: PropagationResult,
-    pub chain: Vec<ClauseIndex>,
-    pub subst: WitnessContainer,
-    pub lateral: ClauseIndex,
-    pub length: usize,
-}
-impl PropagationError {
-    fn new(result: PropagationResult, chain: &ChainDb, subst: &Substitution, lateral: ClauseIndex, length: usize) -> Option<PropagationError> {
-        Some(PropagationError {
-            result: result,
-            chain: chain.extract(lateral)?,
-            subst: subst.extract(),
-            lateral: lateral,
-            length: length,
-        })
-    }
-}
-
+#[derive(Debug)]
 pub enum PropagationResult {
-    Conflict,
     Stable,
-    Null,
-    Missing,
+    Null(usize),
+    Missing(usize),
+    Done(usize),
 }
 impl PropagationResult {
-    #[inline]
-    fn is_conflict(&self) -> bool {
+    pub fn index(&self) -> Option<usize> {
         match self {
-            PropagationResult::Conflict => true,
-            _ => false,
+            PropagationResult::Stable => None,
+            PropagationResult::Null(index) => Some(*index),
+            PropagationResult::Missing(index) => Some(*index),
+            PropagationResult::Done(index) => Some(*index),
         }
     }
 }
 
 pub struct UnitPropagator<'a> {
     block: &'a mut BacktrackBlock,
-    chain: &'a mut ChainDb,
     db: &'a ClauseDb,
     subst: &'a mut Substitution,
-    central: ClauseIndex,
-    conflict: bool,
+    chain: &'a mut ChainDb,
+    issues: PropagationIssuesBuilder,
 }
 impl<'a> UnitPropagator<'a> {
     pub fn new<'b: 'a, 'c: 'a, 'd: 'a, 's: 'a>(
@@ -86,107 +70,174 @@ impl<'a> UnitPropagator<'a> {
         chain: &'c mut ChainDb,
         db: &'d ClauseDb,
         subst: &'s mut Substitution,
-        id: ClauseIndex,
-    ) -> Option<UnitPropagator<'a>> {
-        let mut up = UnitPropagator::<'a> {
+    ) -> UnitPropagator<'a> {
+        UnitPropagator::<'a> {
             block: block,
-            chain: chain,
             db: db,
             subst: subst,
-            central: id,
-            conflict: false,
-        };
-        up.load_central()?;
-        Some(up)
+            chain: chain,
+            issues: PropagationIssuesBuilder::new(),
+        }
     }
-    pub fn propagate_rup(mut self, permissive: bool) -> Result<(), Box<PropagationError>> {
-        let (result, length) = self.propagate_chain(self.central, permissive);
-        if result.is_conflict() {
-            Ok(())
+    pub fn propagate_inference(&mut self, id: ClauseIndex, wsr: bool) -> Option<()> {
+        let result = if wsr {
+            self.propagate_wsr(id)
         } else {
-            Err(Box::new(PropagationError::new(result, &self.chain, &self.subst, self.central, length).unwrap()))
-        }
+            self.propagate_rup(id)
+        };
+        self.block.clear();
+        result
     }
-    pub fn propagate_wsr(mut self, permissive: bool) -> Result<(), Box<PropagationError>> {
+    fn propagate_rup(&mut self, id: ClauseIndex) -> Option<()> {
+        let conflict = self.load_central(id)?;
+        let prop = self.propagate_chain(id, id, conflict);
+        if prop.is_none() && !conflict {
+            self.issues.push_issue(PropagationResult::Stable);
+        }
+        self.issues.push_chain(id);
+        Some(())
+    }
+    pub fn propagate_wsr(&mut self, id: ClauseIndex) -> Option<()> {
+        let conflict = self.load_central(id)?;
         let level = self.block.level();
-        let conflict = self.conflict;
-        for cid in self.db {
-            let touched = self.load_lateral(cid).unwrap();
-            let (result, length) = self.propagate_chain(cid, permissive);
-            let postresult = if !touched && length == 0usize {
-                PropagationResult::Conflict
-            } else {
-                result
-            };
-            if !postresult.is_conflict() {
-                return Err(Box::new(PropagationError::new(postresult, &self.chain, &self.subst, cid, length).unwrap()))
+        for lat in self.db.iter() {
+            let (latconflict, touched) = self.load_lateral(lat, conflict)?;
+            let prop = self.propagate_chain(id, lat, latconflict);
+            if prop.is_none() && touched && !latconflict {
+                self.issues.push_issue(PropagationResult::Stable);
             }
+            self.issues.push_chain(lat);
             self.block.backtrack(level);
-            self.conflict = conflict;
-        }
-        Ok(())
-    }
-    fn load_central(&mut self) -> Option<()> {
-        let rf = self.db.retrieve(self.central)?;
-        for lit in &rf {
-            match self.block.set(lit.complement()) {
-                InsertionTest::Alright | InsertionTest::Repeated => (),
-                InsertionTest::Conflict => self.conflict = true,
-            }
         }
         Some(())
     }
-    fn load_lateral(&mut self, lateral: ClauseIndex) -> Option<bool> {
-        let rf = self.db.retrieve(lateral)?;
-        let mut touched = false;
+    pub fn extract(mut self) -> Option<Box<Vec<(ClauseIndex, PropagationIssues, WitnessContainer)>>> {
+        self.issues.extract(&self.db, &self.chain, &self.subst)
+    }
+    fn load_central(&mut self, id: ClauseIndex) -> Option<bool> {
+        let rf = self.db.retrieve(id)?;
+        let mut conflict = false;
         for lit in &rf {
-            let map = self.subst.map(*lit);
-            touched |= &map != lit;
-            match self.block.set(map.complement()) {
+            match self.block.set(lit.complement()) {
                 InsertionTest::Alright | InsertionTest::Repeated => (),
-                InsertionTest::Conflict => self.conflict = true,
+                InsertionTest::Conflict => conflict = true,
             }
         }
-        Some(touched)
+        Some(conflict)
     }
-    fn propagate_chain(&mut self, chain: ClauseIndex, permissive: bool) -> (PropagationResult, usize) {
-        let mut n: usize = 0usize;
-        let mut conflict = self.conflict;
-        match self.chain.retrieve(chain) {
-            Some(chn) => for cid in chn {
-                let rf = self.db.retrieve(*cid);
-                if cid == &self.central || rf.is_none() {
-                    return (PropagationResult::Missing, n)
-                }
-                if conflict && !permissive {
-                    return (PropagationResult::Null, n)
-                }
-                let prop = Propagation::propagate(&rf.unwrap(), &self.block);
-                match prop.proper() {
-                    Some(lit) => {
-                        self.block.set(lit);
-                    },
-                    None => if prop.conflict() {
+    fn load_lateral(&mut self, lateral: ClauseIndex, mut conflict: bool) -> Option<(bool, bool)> {
+        let rf = self.db.retrieve(lateral)?;
+        let mut touched = false;
+        if !conflict {
+            for lit in &rf {
+                let map = self.subst.map(*lit);
+                touched |= &map != lit;
+                match self.block.set(map.complement()) {
+                    InsertionTest::Alright | InsertionTest::Repeated => (),
+                    InsertionTest::Conflict => {
                         conflict = true;
-                    } else {
-                        return (PropagationResult::Null, n)
-                    },
+                        break;
+                    }
                 }
-                n += 1usize;
-            },
-            None => (),
+            }
         }
-        if conflict {
-            (PropagationResult::Conflict, n)
-        } else {
-            (PropagationResult::Stable, n)
+        Some((conflict, touched))
+    }
+    fn propagate_chain(&mut self, central: ClauseIndex, lat: ClauseIndex, mut conflict: bool) -> Option<()> {
+        let chain = self.chain.retrieve(lat)?;
+        if chain.len() == 0usize {
+            return None;
         }
+        for (n, cid) in chain.iter().enumerate() {
+            if cid == &central {
+                self.issues.push_issue(PropagationResult::Missing(n));
+            } else {
+                match self.db.retrieve(*cid) {
+                    Some(rf) => {
+                        if conflict {
+                            self.issues.push_issue(PropagationResult::Done(n));
+                        } else {
+                            let prop = Propagation::propagate(&rf, &self.block);
+                            match prop.proper() {
+                                Some(lit) => {
+                                    self.block.set(lit);
+                                },
+                                None if prop.conflict() => conflict = true,
+                                None => self.issues.push_issue(PropagationResult::Null(n)),
+                            }
+                        }
+                    },
+                    None => self.issues.push_issue(PropagationResult::Missing(n)),
+                }
+            }
+        }
+        if !conflict {
+            self.issues.push_issue(PropagationResult::Stable)
+        }
+        Some(())
     }
 }
 impl<'a> Drop for UnitPropagator<'a> {
     fn drop(&mut self) {
-        self.block.clear();
         self.subst.clear();
         self.chain.clear();
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::{
+        convert::{TryFrom},
+    };
+	use rand::{self, Rng};
+	use crate::{
+        assignment::{BacktrackBlock, InsertionTest},
+        unitpropagation::{Propagation},
+        variable::{Variable, Literal},
+    };
+
+    #[test]
+    fn test_propagation() {
+        let mut rng = rand::thread_rng();
+        let minvar = Variable::try_from(1i64).unwrap();
+        let maxvar = Variable::try_from(100i64).unwrap();
+        let mut block = BacktrackBlock::new();
+        for _ in 0usize..100usize {
+            let length = rng.gen_range(0usize, 12usize);
+            let mut clause = Vec::<Literal>::new();
+            for _ in 0usize..length {
+                let lit = Literal::random(&mut rng, Some(minvar), maxvar);
+                if let InsertionTest::Alright = block.set(lit) {
+                    clause.push(lit);
+                }
+            }
+            block.clear();
+            for _ in 0usize..100usize {
+                for _ in 0usize..50usize {
+                    let lit = Literal::random(&mut rng, Some(minvar), maxvar);
+                    block.set(lit);
+                }
+                let prop = Propagation::propagate(&clause, &block);
+                let mut count = 0usize;
+                let mut taut = false;
+                let mut last = Literal::Bottom;
+                for lit in &clause {
+                    if block.check(*lit) {
+                        taut = true;
+                    } else if !block.check(lit.complement()) {
+                        last = *lit;
+                        count += 1usize;
+                    }
+                }
+                if taut || count > 1usize {
+                    assert!(prop.null());
+                } else if count == 1usize {
+                    assert!(last == prop.proper().unwrap())
+                } else {
+                    assert!(prop.conflict())
+                }
+                block.clear();
+            }
+        }
     }
 }

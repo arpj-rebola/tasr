@@ -19,3 +19,4 @@ lz4 = "1.23.2"
 colored = "1.9.3"
 log = "0.4"
 fern = { version = "0.6", features = ["colored"] }
+lazy_static = "1.4.0"

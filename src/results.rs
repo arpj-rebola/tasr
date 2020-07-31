@@ -190,16 +190,21 @@ impl ChainIssuesBuilder {
 
 #[derive(Debug)]
 pub struct PropagationIssues {
-	chain: Vec<(ClauseContainer, ClauseIndex, Option<PropagationResult>)>,
+	chain: Vec<(Option<ClauseContainer>, ClauseIndex, Option<PropagationResult>)>,
 	conflict: bool,
 }
 impl PropagationIssues {
 	fn new(id: ClauseIndex, prop: Vec<PropagationResult>, db: &ClauseDb, chain: &ChainDb) -> Option<PropagationIssues> {
-		let chn = chain.retrieve(id)?;
-		let mut outchain = Vec::new();
-		for cid in chn {
-			outchain.push((db.extract(*cid)?, *cid, None));
-		}
+		let mut outchain = match chain.retrieve(id) {
+			Some(chn) => {
+				let mut outchain = Vec::new();
+				for cid in chn {
+					outchain.push((db.extract(*cid), *cid, None));
+				}
+				outchain
+			},
+			None => Vec::new(),
+		};
 		let mut conflict = true;
 		for issue in prop {
 			match issue.index() {
@@ -561,132 +566,143 @@ impl Display for VerificationFailure {
 		match self {
 			VerificationFailure::IncorrectNumVariables(bx) => {
 				write!(f, "{}", "Incorrect declared number of variables\n".white().bold())?;
-				write!(f, "{}{} (CNF format)\n", "  -> ".blue(), &bx.pos)?;
+				write!(f, "{}{} (CNF format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue())?;
 				write!(f, "\tDeclared {} variables in CNF header, found {}.\n", &bx.expected, &bx.found)
 			},
 			VerificationFailure::IncorrectNumClauses(bx) => {
 				write!(f, "{}", "Incorrect declared number of clauses\n".white().bold())?;
-				write!(f, "{}{} (CNF format)\n", "  -> ".blue(), &bx.pos)?;
+				write!(f, "{}{} (CNF format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue())?;
 				write!(f, "\tDeclared {} clauses in CNF header, found {}.\n", &bx.expected, &bx.found)
 			},
 			VerificationFailure::WrongSection(bx) => {
 				write!(f, "{}", "Invalid section\n".white().bold())?;
-				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tSection header '{}' is {}.\n", &bx.header, &bx.issue)
 			},
 			VerificationFailure::InvalidClause(bx) | VerificationFailure::UncompliantClause(bx) => {
 				write!(f, "{}{}{}\n", "Invalid ".white().bold(), format!("{}", &bx.kind).white().bold(), " clause".white().bold())?;
-				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tClause {} at {} position #{} is invalid because:\n", format!("{}", &bx.clause).bold().yellow(), &bx.num.1, &bx.num.0)?;
 				for (lit, rep) in &bx.issues {
 					if *rep {
-						write!(f, "\t  Literal {} is repeated.\n", lit)?;
+						write!(f, "\t- Literal {} is repeated\n", lit)?;
 					} else {
-						write!(f, "\t  Literal {} is inconsistent with literal {}.\n", lit, lit.complement())?;
+						write!(f, "\t- Literal {} is inconsistent with literal {}\n", lit, lit.complement())?;
 					}
 				}
 				Ok(())
 			},
 			VerificationFailure::InvalidWitness(bx) | VerificationFailure::UncompliantWitness(bx) => {
 				write!(f, "{}\n", "Invalid WSR witness".white().bold())?;
-				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tWitness {} for WSR inference at inference position #{} is invalid because:\n", format!("{}", &bx.witness).bold().magenta(), &bx.num)?;
 				for (var, lit, rep) in &bx.issues {
 					if *rep {
-						write!(f, "\t  Mapping {} -> {} is repeated.\n", var, lit)?;
+						write!(f, "\t- Mapping {} -> {} is repeated\n", var, lit)?;
 					} else {
-						write!(f, "\t  Mapping {} -> {} is inconsistent with a previous mapping.\n", var, lit)?;
+						write!(f, "\t- Mapping {} -> {} is inconsistent with a previous mapping\n", var, lit)?;
 					}
 				}
 				Ok(())
 			},
 			VerificationFailure::ConflictId(bx) => {
 				write!(f, "{}\n", "Conflicting clause identifier".white().bold())?;
-				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tA clause is introduced as a {} with clause identifier {} at {} position #{}", &bx.kind, &bx.id, &bx.num.1, &bx.num.0)?;
 				write!(f, ", but clause {} was already assigned that identifier.\n", format!("{}", &bx.clause).bold().yellow())
 			},
 			VerificationFailure::IncorrectCore(bx) => {
 				write!(f, "{}\n", "Incorrect core introduction".white().bold())?;
-				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tThe clause {} is introduced as a core clause ", format!("{}", &bx.clause).bold().yellow())?;
 				write!(f, "with clause identifier {} at core position #{}, but was not found among the premises.\n", &bx.id, &bx.num.0)
 			},
 			VerificationFailure::IncorrectRup(bx) | VerificationFailure::UncompliantRup(bx) => {
 				write!(f, "{}\n", "Incorrect RUP introduction".white().bold())?;
-				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tThe clause {} is introduced as a RUP inference clause ", format!("{}", &bx.clause).bold().yellow())?;
-				write!(f, "at inference position #{}, but the specified unit propagation chain is invalid because:", &bx.num)?;
+				write!(f, "at inference position #{}, but the specified unit propagation chain is invalid because ", &bx.num)?;
 				if bx.chain.chain.is_empty() {
-					write!(f, "(empty)\n")?;
+					write!(f, "it is empty and a conflict is {}.\n", "not reached".red().bold())?;
 				} else {
+					if !bx.chain.conflict {
+						write!(f, "a conflict is {}:\n", "not reached".red().bold())?;
+					} else {
+						write!(f, "it contains the following issues:\n")?;
+					}
 					for (clause, id, resopt) in &bx.chain.chain {
-						write!(f, "\t  {}: {}  ", id, format!("{}", clause).yellow())?;
+						write!(f, "\t{:>8}: ", format!("{}", id))?;
+						match clause {
+							Some(cls) => write!(f, "{:.<40}..", format!("{}", format!("{} ", cls).yellow()))?,
+							None => write!(f, "{:.<40}..", format!("{} ", "???".yellow()))?,
+						}
 						match resopt {
-							Some(PropagationResult::Missing(_)) => write!(f, "clause is missing from currently derived formula\n")?,
-							Some(PropagationResult::Null(_)) => write!(f, "clause does not propagate a literal or produce a conflict\n")?,
-							Some(PropagationResult::Done(_)) => write!(f, "conflict was already reached\n")?,
-							_ => write!(f, "\n")?,
+							Some(PropagationResult::Missing(_)) => write!(f, "{}\n", "missing clause".red().bold())?,
+							Some(PropagationResult::Null(_)) => write!(f, "{}\n", "no propagation or conflict".red().bold())?,
+							Some(PropagationResult::Done(_)) => write!(f, "{}\n", "conflict already reached".red().bold())?,
+							_ => write!(f, "{}\n", "ok".green().bold())?,
 						}
 					}
-				}
-				if !bx.chain.conflict {
-					write!(f, "a conflict is not reached\n")?;
 				}
 				Ok(())
 			},
 			VerificationFailure::IncorrectWsr(bx) | VerificationFailure::UncompliantWsr(bx) => {
 				write!(f, "{}\n", "Incorrect WSR introduction".white().bold())?;
-				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tThe clause {} is introduced as a WSR inference clause ", format!("{}", &bx.clause).bold().yellow())?;
 				write!(f, "upon the witness {} ", format!("{}", &bx.witness).bold().magenta())?;
-				write!(f, "at inference position #{}. The unit propagation chain for the ", &bx.num)?;
+				write!(f, "at inference position #{}. The unit propagation chain for ", &bx.num)?;
 				match &bx.latid {
-					Some(id) => write!(f, "{}: {} ", id, format!("{}", &bx.latclause).bold().yellow())?,
-					None => write!(f, "clause itself ")?,
+					Some(id) => write!(f, "clause {}: {} is invalid because ", id, format!("{}", &bx.latclause).bold().yellow())?,
+					None => write!(f, "the clause itself is invalid because ")?,
 				}
-				write!(f, "is invalid because:")?;
 				if bx.chain.chain.is_empty() {
-					write!(f, "(empty)\n")?;
+					write!(f, "it is empty and a conflict is {}.\n", "not reached".red().bold())?;
 				} else {
+					if !bx.chain.conflict {
+						write!(f, "a conflict is {}:\n", "not reached".red().bold())?;
+					} else {
+						write!(f, "it contains the following issues:\n")?;
+					}
 					for (clause, id, resopt) in &bx.chain.chain {
-						write!(f, "\t  {}: {}  ", id, format!("{}", clause).yellow())?;
+						write!(f, "\t{:>8}: ", format!("{}", id))?;
+						match clause {
+							Some(cls) => write!(f, "{:.<40}..", format!("{}", format!("{} ", cls).yellow()))?,
+							None => write!(f, "{:.<40}..", format!("{} ", "???".yellow()))?,
+						}
 						match resopt {
-							Some(PropagationResult::Missing(_)) => write!(f, "clause is missing from currently derived formula\n")?,
-							Some(PropagationResult::Null(_)) => write!(f, "clause does not propagate a literal or produce a conflict\n")?,
-							Some(PropagationResult::Done(_)) => write!(f, "conflict was already reached\n")?,
-							_ => write!(f, "\n")?,
+							Some(PropagationResult::Missing(_)) => write!(f, "{}\n", "missing clause".red().bold())?,
+							Some(PropagationResult::Null(_)) => write!(f, "{}\n", "no propagation or conflict".red().bold())?,
+							Some(PropagationResult::Done(_)) => write!(f, "{}\n", "conflict already reached".red().bold())?,
+							_ => write!(f, "{}\n", "ok".green().bold())?,
 						}
 					}
-				}
-				if !bx.chain.conflict {
-					write!(f, "a conflict is not reached\n")?;
 				}
 				Ok(())
 			},
 			VerificationFailure::InvalidLaterals(bx) => {
 				write!(f, "{}\n", "Invalid lateral chains in WSR inference".white().bold())?;
-				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tThe clause {} is introduced as a WSR inference clause ", format!("{}", &bx.clause).bold().yellow())?;
 				write!(f, "at inference position #{}, but the unit propagation chains for the following laterals are invalid:\n", &bx.num)?;
 				for (id, rep) in &bx.laterals {
 					if *rep {
-						write!(f, "\t  {}: another unit propagation chain exists for this lateral clause\n", id)?;
+						write!(f, "\t{:>8}: {}\n", format!("{}", id), "several unit propagation chains exist for this lateral clause".red().bold())?;
 					} else {
-						write!(f, "\t  {}: no clause occurs in the currently derived formula with this clause identifier\n", id)?;
+						write!(f, "\t{:>8}: {}\n", format!("{}", id), "no clause occurs in the currently derived formula with this clause identifier".red().bold())?;
 					}
 				}
 				Ok(())
 			},
 			VerificationFailure::MissingDeletion(bx) => {
 				write!(f, "{}\n", "Missing clause deletion".white().bold())?;
-				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tThe deletion instruction at inference position #{} ", &bx.num)?;
 				write!(f, "deletes a clause with clause identifier {}, which does not occur in the currently derived formula.\n", &bx.id)
 			},
 			VerificationFailure::Unrefuted(bx) => {
 				write!(f, "{}\n", "Unrefuted derivation".white().bold())?;
-				write!(f, "{}{} ({} format)\n", "  -> ".blue(), &bx.pos, &bx.format)?;
+				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tNo empty clause occurs in the derived formula at the end of the derivation, after inference position #{}.\n", &bx.num)
 			},
 		}

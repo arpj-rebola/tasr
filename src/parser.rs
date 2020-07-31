@@ -128,13 +128,13 @@ impl<'a> DimacsParser<'a> {
             Some(c) if c == b'-' => self.read_negative_number(),
             Some(c) if (c as char).is_alphabetic() => self.read_letter(c),
             None => None,
-            _ => panic!(self.error_invalid_character()),
+            _ => self.error_invalid_character(),
         }
     }
     fn read_negative_number(&mut self) -> Option<DimacsLexeme> {
         match self.input.next() {
             Some(c) if (c as char).is_numeric() => self.read_number(c, false),
-            _ => panic!(self.error_invalid_number()),
+            _ => self.error_invalid_number(),
         }
     }
     fn read_number(&mut self, initial: u8, sign: bool) -> Option<DimacsLexeme> {
@@ -148,12 +148,12 @@ impl<'a> DimacsParser<'a> {
             Some(c) if (c as char).is_numeric() => {
                 match num.checked_mul(10i64).and_then(|x| x.checked_add(factor * ((c - b'0') as i64))) {
                     Some(x) => num = x,
-                    None => panic!(self.error_out_of_range_i64()),
+                    None => self.error_out_of_range_i64(),
                 }
             },
             Some(c) if (c as char).is_whitespace() => break Some(DimacsLexeme::Number(num)),
             None => break Some(DimacsLexeme::Number(num)),
-            _ => panic!(self.error_invalid_number()),
+            _ => self.error_invalid_number(),
         } }
     }
     fn read_letter(&mut self, letter: u8) -> Option<DimacsLexeme> {
@@ -163,7 +163,7 @@ impl<'a> DimacsParser<'a> {
             match self.input.next() {
                 Some(c) if (c as char).is_whitespace() => Some(DimacsLexeme::Letter(letter)),
                 None => Some(DimacsLexeme::Letter(letter)),
-                _ => panic!(self.error_invalid_letter()),
+                _ => self.error_invalid_letter(),
             }
         }
     }
@@ -171,7 +171,7 @@ impl<'a> DimacsParser<'a> {
         let mut hd = [0u8; 8usize];
         hd[0] = loop { match self.input.next() {
             Some(c) if (c as char).is_whitespace() => (),
-            None => panic!(self.error_invalid_header()),
+            None => self.error_invalid_header(),
             Some(c) => break c,
         } };
         for i in 0usize..8usize {
@@ -179,11 +179,11 @@ impl<'a> DimacsParser<'a> {
                 Some(c) if (c as char).is_alphabetic() => if i < 7usize {
                     hd[i + 1] = c;
                 } else {
-                    panic!(self.error_out_of_range_header());
+                    self.error_out_of_range_header()
                 },
                 Some(c) if (c as char).is_whitespace() => break,
                 None => break,
-                _ => panic!(self.error_invalid_header()),
+                _ => self.error_invalid_header(),
             }
         }
         Some(DimacsLexeme::Header(hd))
@@ -206,94 +206,106 @@ impl<'a> DimacsParser<'a> {
             _ => (),
         } }
     }
-    fn error_invalid_character(&self) -> ParsingError {
-        ParsingError::InvalidCharacter(Box::new(LexingError {
+    fn error_invalid_character(&self) -> ! {
+        let err = ParsingError::InvalidCharacter(Box::new(LexingError {
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_invalid_number(&self) -> ParsingError {
-        ParsingError::InvalidNumber(Box::new(LexingError {
+    fn error_invalid_number(&self) -> ! {
+        let err = ParsingError::InvalidNumber(Box::new(LexingError {
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_i64(&self) -> ParsingError {
-        ParsingError::OutOfRangeI64(Box::new(LexingError {
+    fn error_out_of_range_i64(&self) -> ! {
+        let err = ParsingError::OutOfRangeI64(Box::new(LexingError {
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_invalid_letter(&self) -> ParsingError {
-        ParsingError::InvalidLetter(Box::new(LexingError {
+    fn error_invalid_letter(&self) -> ! {
+        let err = ParsingError::InvalidLetter(Box::new(LexingError {
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_invalid_header(&self) -> ParsingError {
-        ParsingError::InvalidHeader(Box::new(LexingError {
+    fn error_invalid_header(&self) -> ! {
+        let err = ParsingError::InvalidHeader(Box::new(LexingError {
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_header(&self) -> ParsingError {
-        ParsingError::OutOfRangeHeader(Box::new(LexingError {
+    fn error_out_of_range_header(&self) -> ! {
+        let err = ParsingError::OutOfRangeHeader(Box::new(LexingError {
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_expected_field(&self, field: &str) -> ParsingError {
-        ParsingError::ExpectedField(Box::new(ExpectedField {
+    fn error_expected_field(&self, field: &str) -> ! {
+        let err = ParsingError::ExpectedField(Box::new(ExpectedField {
             field: field.to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_id(&self, num: i64) -> ParsingError {
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+    fn error_out_of_range_id(&self, num: i64) -> ! {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}]", 1i64, ClauseIndex::MaxValue),
             field: "clause identifier".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_literal(&self, num: i64) -> ParsingError {
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+    fn error_out_of_range_literal(&self, num: i64) -> ! {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}] U [{} .. {}]", -Literal::MaxValue, -1i64, 1i64, Literal::MaxValue),
             field: "literal".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_variable(&self, num: i64) -> ParsingError {
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+    fn error_out_of_range_variable(&self, num: i64) -> ! {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}]", 1i64, Variable::MaxValue),
             field: "variable".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_num_variables(&self, num: i64) -> ParsingError {
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+    fn error_out_of_range_num_variables(&self, num: i64) -> ! {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}]", 0i64, Variable::MaxValue),
             field: "number of variables".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_num_clauses(&self, num: i64) -> ParsingError {
+    fn error_out_of_range_num_clauses(&self, num: i64) -> ! {
         let max = i64::try_from(usize::max_value()).unwrap_or(i64::max_value());
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}]", 1i64, max),
             field: "number of clauses".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
 }
 impl<'a> AsrParser for DimacsParser<'a> {
@@ -309,16 +321,16 @@ impl<'a> AsrParser for DimacsParser<'a> {
         let vars = match self.next() {
             Some(DimacsLexeme::Number(num)) => match MaybeVariable::try_from(num) {
                 Ok(var) => var,
-                Err(num) => panic!(self.error_out_of_range_num_variables(num)),
+                Err(num) => self.error_out_of_range_num_variables(num),
             },
-            _ => panic!(self.error_expected_field("number of variables")),
+            _ => self.error_expected_field("number of variables"),
         };
         let cls = match self.next() {
             Some(DimacsLexeme::Number(num)) => match usize::try_from(num) {
                 Ok(cls) => cls,
-                Err(_) => panic!(self.error_out_of_range_num_clauses(num)),
+                Err(_) => self.error_out_of_range_num_clauses(num),
             },
-            _ => panic!(self.error_expected_field("number of clauses")),
+            _ => self.error_expected_field("number of clauses"),
         };
         CnfHeaderStats {
             variables: vars,
@@ -329,7 +341,7 @@ impl<'a> AsrParser for DimacsParser<'a> {
         let res = match self.peek() {
             Some(DimacsLexeme::Number(_)) => Some(()),
             None => None,
-            _ => panic!(self.error_expected_field("clause literal, or EOF")),
+            _ => self.error_expected_field("clause literal, or EOF"),
         };
         Positioned(res, self.pos.right())
     }
@@ -343,13 +355,13 @@ impl<'a> AsrParser for DimacsParser<'a> {
                     match self.next() {
                         Some(DimacsLexeme::Number(num)) => match ClauseIndex::try_from(num) {
                             Ok(id) => Positioned(Some(id), pos),
-                            Err(num) => panic!(self.error_out_of_range_id(num)),
+                            Err(num) => self.error_out_of_range_id(num),
                         },
-                        _ => panic!(self.error_expected_field("clause identifier")),
+                        _ => self.error_expected_field("clause identifier"),
                     }
                 },
                 None => Positioned(None, self.pos.left()),
-                _ => panic!(self.error_expected_field("core marker 'k', or EOF")),
+                _ => self.error_expected_field("core marker 'k', or EOF"),
             }
         }
     }
@@ -363,9 +375,9 @@ impl<'a> AsrParser for DimacsParser<'a> {
                     match self.next() {
                         Some(DimacsLexeme::Number(num)) => match ClauseIndex::try_from(num) {
                             Ok(id) => Positioned(Some(AsrInstructionKind::Rup(id)), pos),
-                            Err(num) => panic!(self.error_out_of_range_id(num)),
+                            Err(num) => self.error_out_of_range_id(num),
                         },
-                        _ => panic!(self.error_expected_field("clause identifier")),
+                        _ => self.error_expected_field("clause identifier"),
                     }
                 },
                 Some(DimacsLexeme::Letter(b's')) => {
@@ -373,14 +385,14 @@ impl<'a> AsrParser for DimacsParser<'a> {
                     match self.next() {
                         Some(DimacsLexeme::Number(num)) => match ClauseIndex::try_from(num) {
                             Ok(id) => Positioned(Some(AsrInstructionKind::Wsr(id)), pos),
-                            Err(num) => panic!(self.error_out_of_range_id(num)),
+                            Err(num) => self.error_out_of_range_id(num),
                         },
-                        _ => panic!(self.error_expected_field("clause identifier")),
+                        _ => self.error_expected_field("clause identifier"),
                     }
                 },
                 Some(DimacsLexeme::Letter(b'd')) => Positioned(Some(AsrInstructionKind::Del), self.pos.left()),
                 None => Positioned(None, self.pos.left()),
-                _ => panic!(self.error_expected_field("instruction marker 'r', 's', 'd', or EOF"))
+                _ => self.error_expected_field("instruction marker 'r', 's', 'd', or EOF")
             }
         }
     }
@@ -389,9 +401,9 @@ impl<'a> AsrParser for DimacsParser<'a> {
             Some(DimacsLexeme::Number(num)) => match Literal::try_from(num) {
                 Ok(lit) => Some(lit),
                 Err(0i64) => None,
-                Err(num) => panic!(self.error_out_of_range_literal(num)),
+                Err(num) => self.error_out_of_range_literal(num),
             },
-            _ => panic!(self.error_expected_field("literal, or end-of-clause zero")),
+            _ => self.error_expected_field("literal, or end-of-clause zero"),
         }
     }
     fn parse_witness(&mut self) -> Option<(Variable, Literal)> {
@@ -399,18 +411,18 @@ impl<'a> AsrParser for DimacsParser<'a> {
             Some(DimacsLexeme::Number(num)) => match Variable::try_from(num) {
                 Ok(var) => var,
                 Err(0i64) => return None,
-                Err(num) => panic!(self.error_out_of_range_variable(num)),
+                Err(num) => self.error_out_of_range_variable(num),
             },
-            _ => panic!(self.error_expected_field("variable, or end-of-witness zero")),
+            _ => self.error_expected_field("variable, or end-of-witness zero"),
         };
         let lit = match self.next() {
             Some(DimacsLexeme::Number(num)) => match Literal::try_from(num) {
                 Ok(lit) => lit,
-                Err(num) => panic!(self.error_out_of_range_literal(num)),
+                Err(num) => self.error_out_of_range_literal(num),
             },
             Some(DimacsLexeme::Letter(b't')) => Literal::Top,
             Some(DimacsLexeme::Letter(b'f')) => Literal::Bottom,
-            _ => panic!(self.error_expected_field("literal, top 't', or bottom 'b'")),
+            _ => self.error_expected_field("literal, top 't', or bottom 'b'"),
         };
         Some((var, lit))
     }
@@ -419,9 +431,12 @@ impl<'a> AsrParser for DimacsParser<'a> {
             Some(DimacsLexeme::Number(num)) => match ClauseIndex::try_from(num) {
                 Ok(lit) => Some(lit),
                 Err(0i64) => None,
-                Err(num) => panic!(self.error_out_of_range_id(num)),
+                Err(num) => self.error_out_of_range_id(num),
             },
-            _ => panic!(self.error_expected_field("clause identifier, or end-of-chain zero")),
+            x => {
+                println!("error: {:?}", x);
+                self.error_expected_field("clause identifier, or end-of-chain zero")
+            },
         }
     }
     fn name(&self) -> &Path {
@@ -486,13 +501,13 @@ impl<'a> VbeParser<'a> {
                             break Some(VbeLexeme::Number(num))
                         }
                     } else {
-                        panic!(self.error_out_of_range_number())
+                        self.error_out_of_range_number()
                     }
                 },
                 None => if shift == 0u8 {
                     break None
                 } else {
-                    panic!(self.error_invalid_vbe_number())
+                    self.error_invalid_vbe_number()
                 },
             }
         }
@@ -502,90 +517,100 @@ impl<'a> VbeParser<'a> {
         for i in 0usize..8usize {
             match self.input.next() {
                 Some(c) => hd[i] = c,
-                None => panic!(self.error_invalid_vbe_header()),
+                None => self.error_invalid_vbe_header(),
             }
         }
         Some(VbeLexeme::Header(hd))
     }
-    fn error_out_of_range_number(&self) -> ParsingError {
-        ParsingError::OutOfRangeU64(Box::new(LexingError {
+    fn error_out_of_range_number(&self) -> ! {
+        let err = ParsingError::OutOfRangeU64(Box::new(LexingError {
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_invalid_vbe_number(&self) -> ParsingError {
-        ParsingError::InvalidVbeNumber(Box::new(LexingError {
+    fn error_invalid_vbe_number(&self) -> ! {
+        let err = ParsingError::InvalidVbeNumber(Box::new(LexingError {
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_invalid_vbe_header(&self) -> ParsingError {
-        ParsingError::InvalidVbeHeader(Box::new(LexingError {
+    fn error_invalid_vbe_header(&self) -> ! {
+        let err = ParsingError::InvalidVbeHeader(Box::new(LexingError {
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_expected_field(&self, field: &str) -> ParsingError {
-        ParsingError::ExpectedField(Box::new(ExpectedField {
+    fn error_expected_field(&self, field: &str) -> ! {
+        let err = ParsingError::ExpectedField(Box::new(ExpectedField {
             field: field.to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_id(&self, num: u64) -> ParsingError {
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+    fn error_out_of_range_id(&self, num: u64) -> ! {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}]", 1i64, ClauseIndex::MaxValue),
             field: "clause identifier".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_literal(&self, num: u64) -> ParsingError {
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+    fn error_out_of_range_literal(&self, num: u64) -> ! {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}]", 2u64, u32::max_value()),
             field: "literal".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_atom(&self, num: u64) -> ParsingError {
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+    fn error_out_of_range_atom(&self, num: u64) -> ! {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}]", 0u64, u32::max_value()),
             field: "literal, top or bottom".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_variable(&self, num: u64) -> ParsingError {
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+    fn error_out_of_range_variable(&self, num: u64) -> ! {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}]", 1i64, Variable::MaxValue),
             field: "variable".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_num_variables(&self, num: u64) -> ParsingError {
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+    fn error_out_of_range_num_variables(&self, num: u64) -> ! {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}]", 0i64, Variable::MaxValue),
             field: "number of variables".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
-    fn error_out_of_range_num_clauses(&self, num: u64) -> ParsingError {
+    fn error_out_of_range_num_clauses(&self, num: u64) -> ! {
         let max = u64::try_from(usize::max_value()).unwrap_or(u64::max_value());
-        ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
+        let err = ParsingError::OutOfRangeField(Box::new(OutOfRangeField {
             found: format!("{}", num),
             range: format!("[{} .. {}]", 1i64, max),
             field: "number of clauses".to_string(),
             pos: self.input.position().source(),
             format: self.format.to_string(),
-        }))
+        }));
+		panic!(format!("{}", err))
     }
 }
 impl<'a> AsrParser for VbeParser<'a> {
@@ -601,16 +626,16 @@ impl<'a> AsrParser for VbeParser<'a> {
         let vars = match self.next() {
             Some(VbeLexeme::Number(num)) => match MaybeVariable::try_from(num) {
                 Ok(var) => var,
-                Err(num) => panic!(self.error_out_of_range_num_variables(num)),
+                Err(num) => self.error_out_of_range_num_variables(num),
             },
-            _ => panic!(self.error_expected_field("number of variables")),
+            _ => self.error_expected_field("number of variables"),
         };
         let clauses = match self.next() {
             Some(VbeLexeme::Number(num)) => match usize::try_from(num) {
                 Ok(cls) => cls,
-                Err(_) => panic!(self.error_out_of_range_num_clauses(num)),
+                Err(_) => self.error_out_of_range_num_clauses(num),
             },
-            _ => panic!(self.error_expected_field("number of clauses")),
+            _ => self.error_expected_field("number of clauses"),
         };
         CnfHeaderStats {
             variables: vars,
@@ -621,7 +646,7 @@ impl<'a> AsrParser for VbeParser<'a> {
         let res = match self.peek() {
             Some(VbeLexeme::Number(_)) => Some(()),
             None => None,
-            _ => panic!(self.error_expected_field("clause literal, or EOF")),
+            _ => self.error_expected_field("clause literal, or EOF"),
         };
         Positioned(res, self.pos.right())
     }
@@ -635,13 +660,13 @@ impl<'a> AsrParser for VbeParser<'a> {
                     match self.next() {
                         Some(VbeLexeme::Number(num)) => match ClauseIndex::try_from(num) {
                             Ok(id) => Positioned(Some(id), pos),
-                            Err(num) => panic!(self.error_out_of_range_id(num)),
+                            Err(num) => self.error_out_of_range_id(num),
                         },
-                        _ => panic!(self.error_expected_field("clause identifier")),
+                        _ => self.error_expected_field("clause identifier"),
                     }
                 },
                 None => Positioned(None, self.pos.left()),
-                _ => panic!(self.error_expected_field("core marker '0x6B', or EOF")),
+                _ => self.error_expected_field("core marker '0x6B', or EOF"),
             }
         }
     }
@@ -655,9 +680,9 @@ impl<'a> AsrParser for VbeParser<'a> {
                     match self.next() {
                         Some(VbeLexeme::Number(num)) => match ClauseIndex::try_from(num) {
                             Ok(id) => Positioned(Some(AsrInstructionKind::Rup(id)), pos),
-                            Err(num) => panic!(self.error_out_of_range_id(num)),
+                            Err(num) => self.error_out_of_range_id(num),
                         },
-                        _ => panic!(self.error_expected_field("clause identifier")),
+                        _ => self.error_expected_field("clause identifier"),
                     }
                 },
                 Some(VbeLexeme::Number(VbeParser::<'a>::LowercaseS)) => {
@@ -665,14 +690,14 @@ impl<'a> AsrParser for VbeParser<'a> {
                     match self.next() {
                         Some(VbeLexeme::Number(num)) => match ClauseIndex::try_from(num) {
                             Ok(id) => Positioned(Some(AsrInstructionKind::Wsr(id)), pos),
-                            Err(num) => panic!(self.error_out_of_range_id(num)),
+                            Err(num) => self.error_out_of_range_id(num),
                         },
-                        _ => panic!(self.error_expected_field("clause identifier")),
+                        _ => self.error_expected_field("clause identifier"),
                     }
                 },
                 Some(VbeLexeme::Number(VbeParser::<'a>::LowercaseD)) => Positioned(Some(AsrInstructionKind::Del), self.pos.left()),
                 None => Positioned(None, self.pos.left()),
-                _ => panic!(self.error_expected_field("instruction marker '0x72', '0x73', '0x64', or EOF"))
+                _ => self.error_expected_field("instruction marker '0x72', '0x73', '0x64', or EOF")
             }
         }
     }
@@ -681,9 +706,9 @@ impl<'a> AsrParser for VbeParser<'a> {
             Some(VbeLexeme::Number(num)) => match Literal::try_from(num) {
                 Ok(lit) => Some(lit),
                 Err(0u64) => None,
-                Err(num) => panic!(self.error_out_of_range_literal(num)),
+                Err(num) => self.error_out_of_range_literal(num),
             },
-            _ => panic!(self.error_expected_field("literal, or end-of-clause zero")),
+            _ => self.error_expected_field("literal, or end-of-clause zero"),
         }
     }
     fn parse_witness(&mut self) -> Option<(Variable, Literal)> {
@@ -691,18 +716,18 @@ impl<'a> AsrParser for VbeParser<'a> {
             Some(VbeLexeme::Number(num)) => match Variable::try_from(num) {
                 Ok(var) => var,
                 Err(0u64) => return None,
-                Err(num) => panic!(self.error_out_of_range_variable(num)),
+                Err(num) => self.error_out_of_range_variable(num),
             },
-            _ => panic!(self.error_expected_field("variable, or end-of-witness zero")),
+            _ => self.error_expected_field("variable, or end-of-witness zero"),
         };
         let lit = match self.next() {
             Some(VbeLexeme::Number(num)) => match Literal::try_from(num) {
                 Ok(lit) => lit,
                 Err(0u64) => Literal::Top,
                 Err(1u64) => Literal::Bottom,
-                Err(num) => panic!(self.error_out_of_range_atom(num)),
+                Err(num) => self.error_out_of_range_atom(num),
             },
-            _ => panic!(self.error_expected_field("literal, positive zero or negative zero")),
+            _ => self.error_expected_field("literal, positive zero or negative zero"),
         };
         Some((var, lit))
     }
@@ -711,9 +736,9 @@ impl<'a> AsrParser for VbeParser<'a> {
             Some(VbeLexeme::Number(num)) => match ClauseIndex::try_from(num) {
                 Ok(lit) => Some(lit),
                 Err(0u64) => None,
-                Err(num) => panic!(self.error_out_of_range_id(num)),
+                Err(num) => self.error_out_of_range_id(num),
             },
-            _ => panic!(self.error_expected_field("clause identifier, or end-of-chain zero")),
+            _ => self.error_expected_field("clause identifier, or end-of-chain zero"),
         }
     }
     fn name(&self) -> &Path {
@@ -764,7 +789,7 @@ impl<'a> AsrParser for VbeParser<'a> {
 //             },
 //             Err(pain) => match pain.downcast::<ParsingError>() {
 //                 Ok(ps) => assert!(mem::discriminant(&err.unwrap()) == mem::discriminant(&ps)),
-//                 Err(e) => panic!(e),
+//                 Err(e) => e,
 //             }
 //         }
 // 	}
@@ -793,7 +818,7 @@ impl<'a> AsrParser for VbeParser<'a> {
 //             },
 //             Err(pain) => match pain.downcast::<ParsingError>() {
 //                 Ok(ps) => assert!(mem::discriminant(&err.unwrap()) == mem::discriminant(&ps)),
-//                 Err(e) => panic!(e),
+//                 Err(e) => e,
 //             }
 //         }
 //     }

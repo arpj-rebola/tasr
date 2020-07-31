@@ -60,13 +60,13 @@ impl<'a> FilePosition<'a> {
 			self.col += 4usize;
 		} else {
 			self.forward();
-			self.col &= 1usize;
+			self.col |= 1usize;
 		}
 	}
 	pub fn finish(&mut self) {
 		if self.col & 2usize == 0usize {
 			self.forward();
-			self.col &= 2usize;
+			self.col |= 2usize;
 		}
 	}
 	#[inline]
@@ -101,9 +101,9 @@ impl<'a> FilePosition<'a> {
 impl<'a> Display for FilePosition<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		if self.binary() {
-			write!(f, "{:?} (byte {:?})", self.name, self.column())
+			write!(f, "{}:{}", self.name.to_str().unwrap(), self.column())
 		} else {
-			write!(f, "{:?} {:?}:{:?}", self.name, self.line(), self.column())
+			write!(f, "{}:{}:{}", self.name.to_str().unwrap(), self.line(), self.column())
 		}
     }
 }
@@ -185,9 +185,9 @@ impl SourcePosition {
 impl Display for SourcePosition {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 		if self.binary() {
-			write!(f, "{:?} (byte {:?})", self.name, self.col)
+			write!(f, "{}:{}", self.name.to_str().unwrap(), self.col)
 		} else {
-			write!(f, "{:?} {:?}:{:?}", self.name, self.ln, self.col)
+			write!(f, "{}:{}:{}", self.name.to_str().unwrap(), self.ln, self.col)
 		}
     }
 }
@@ -228,21 +228,21 @@ impl<'a> InputStream<'a> {
 		InputStream::<'a>::new(source.bytes().map(|x| Ok(x)), Path::new(name), binary)
 	}
 	pub fn open<'b: 'a>(path: &'b Path, format: CompressionFormat, binary: bool) -> InputStream<'a> {
-		let file = File::open(&path).unwrap_or_else(|err| panic!(err));
+		let file = File::open(&path).unwrap_or_else(|err| panic!(format!("{}", err)));
 		match format {
 			CompressionFormat::Plain => InputStream::<'a>::new(BufReader::new(file).bytes(), path, binary),
-			CompressionFormat::Zst => InputStream::<'a>::new(BufReader::new(ZstDecoder::new(file).unwrap_or_else(|err| panic!(err))).bytes(), path, binary),
+			CompressionFormat::Zst => InputStream::<'a>::new(BufReader::new(ZstDecoder::new(file).unwrap_or_else(|err| panic!(format!("{}", err)))).bytes(), path, binary),
 			CompressionFormat::Gz => InputStream::<'a>::new(BufReader::new(GzDecoder::new(file)).bytes(), path, binary),
 			CompressionFormat::Bz2 => InputStream::<'a>::new(BufReader::new(Bz2Decoder::new(file)).bytes(), path, binary),
 			CompressionFormat::Xz => InputStream::<'a>::new(BufReader::new(XzDecoder::new(file)).bytes(), path, binary),
-			CompressionFormat::Lz4 => InputStream::<'a>::new(BufReader::new(Lz4Decoder::new(file).unwrap_or_else(|err| panic!(err))).bytes(), path, binary),
+			CompressionFormat::Lz4 => InputStream::<'a>::new(BufReader::new(Lz4Decoder::new(file).unwrap_or_else(|err| panic!(format!("{}", err)))).bytes(), path, binary),
 		}
 	}
 	pub fn new<'b: 'a, 'c: 'a, I>(it: I, path: &'b Path, binary: bool) -> InputStream<'a> where
 		I: 'c + Iterator<Item = IoResult<u8>>
 	{
 		InputStream::<'a> {
-			it: Box::new(it.map(|x| x.unwrap_or_else(|err| panic!(err))).fuse()),
+			it: Box::new(it.map(|x| x.unwrap_or_else(|err| panic!(format!("{}", err)))).fuse()),
 			pos: FilePosition::<'a>::new(path, binary),
 		}
 	}

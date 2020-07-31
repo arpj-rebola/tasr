@@ -1,5 +1,8 @@
 #![allow(non_upper_case_globals)]
 
+#[macro_use]
+extern crate lazy_static;
+
 pub mod hasher;
 pub mod bst;
 pub mod chunkdb;
@@ -22,6 +25,7 @@ use std::{
     path::{PathBuf},
     process::{self},
     panic::{self},
+    sync::{Mutex},
 };
 
 use colored::{
@@ -38,6 +42,13 @@ use crate::{
 use clap::{
     Arg, App, AppSettings, Error as ClapError, ErrorKind as ClapErrorKind, Result as ClapResult,
 };
+
+lazy_static! {
+    static ref PanicInfo: Mutex<String> = {
+        Mutex::new(String::new())
+    };
+}
+
 
 #[derive(Debug)]
 pub struct AppConfig {
@@ -61,20 +72,26 @@ pub struct AppConfig {
 }
 
 fn main() {
+    // panic::set_hook(Box::new(|info| {
+    //     PanicInfo.lock().unwrap().push_str(&format!("{}", info));
+    // }));
     let result = panic::catch_unwind(run);
     match result {
-        Ok(()) => process::exit(0),
+        Ok(_) => process::exit(0),
         Err(pain) => {
             match pain.downcast::<String>() {
                 Ok(msg) => eprintln!("{} {}", "Fatal error:".red().bold().underline(), msg),
-                Err(_) => eprintln!("{} {}", "Fatal error:".red().bold().underline(), "unexpected runtime error."),
+                Err(_) => {
+                    eprintln!("{} {}", "Fatal error:".red().bold().underline(), "unexpected runtime error.");
+                    eprintln!("Info: {}", PanicInfo.lock().unwrap());
+                },
             }
             process::exit(1);
         },
     }
 }
 
-fn run() {
+fn run() -> Option<CheckerStats> {
     let app = build_cli_parser();
     let config_result = parse_cli_arguments(app);
     let (mut logger, output_slot, error_slot, _fix_slot) = setup_logger(&config_result);
@@ -86,11 +103,11 @@ fn run() {
                 None => 0usize,
             };
             log_error!(logger.handle(error_slot), target: "Error"; "{}", &err.message[n..]);
-            return;
+            return None;
         },
         Err(err) => {
             log_error!(logger.handle(output_slot); "{}", err);
-            return;
+            return None;
         }
     };
     let check_result = {
@@ -99,6 +116,9 @@ fn run() {
         check_proof(&config, &mut *cnf_input, &mut *asr_input, &mut logger, error_slot)
     };
     output_results(&config, &check_result, &mut logger, output_slot);
+    logger.flush(output_slot);
+    logger.flush(error_slot);
+    Some(check_result)
 }
 
 fn build_cli_parser<'a, 'b>() -> App<'a, 'b> {
@@ -299,7 +319,7 @@ fn setup_logger<'a, 'b: 'a>(config_result: &'b Result<AppConfig, ClapError>) -> 
     let output_slot = logger.insert(LoggerSlot::new(
         OutputStream::new(io::stdout()), LoggerThreshold::Info, logger_format!(md, msg {
             md.target() == "Result" => ("{} {}\n", "Result:".green().bold().underline(), format!("{}", msg).bold())
-            md.target() == "Stats" => ("{}\n{}\n", "Stats:".green().bold().underline(), msg)
+            md.target() == "Stats" => ("{}\n{}\n", "Stats:".blue().bold().underline(), msg)
             md.target() == "Warning" =>  ("{} {}\n", "Warning:".yellow().bold().underline(), msg)
             md.target() == "Error" =>  ("{} {}\n", "Error:".red().bold().underline(), msg)
             _ => ("{}\n", msg)
@@ -334,7 +354,7 @@ fn setup_inputs<'a, 'b: 'a>(config: &'b AppConfig, stdin: &'b Stdin) -> (Box<dyn
     } else {
         Box::new(DimacsParser::<'_>::new(cnf_input, "CNF"))
     };
-    let asr_input = match &config.cnf_path {
+    let asr_input = match &config.asr_path {
         Some(path) => InputStream::<'_>::open(&path, config.asr_compression, config.asr_binary),
         None => InputStream::<'_>::stdin(stdin, config.asr_binary),
     };
@@ -362,16 +382,16 @@ fn check_proof(config: &AppConfig, cnf: &mut dyn AsrParser, asr: &mut dyn AsrPar
 }
 
 fn output_results(config: &AppConfig, stats: &CheckerStats, logger: &mut Logger, output: LoggerId) {
-    let (errors, warnings) = stats.errors.count();
+    let (warnings, errors) = stats.errors.count();
     if errors == 0usize {
-        log_output!(logger.handle(output), target: "Result"; "{}\n[checked in {}s with {} errors and {} warnings]",
-        "verified proof".bold(),
+        log_output!(logger.handle(output), target: "Result"; "{} (checked in {}s with {} errors and {} warnings)",
+        format!("{}", "verified proof".bold()),
         stats.time_trimming.duration_since(stats.time_start).as_secs(),
         errors,
         warnings);
     } else {
-        log_output!(logger.handle(output), target: "Error"; "{}\n[checked in {}s with {} errors and {} warnings]",
-        "incorrect proof".bold(),
+        log_output!(logger.handle(output), target: "Result"; "{} [checked in {}s with {} errors and {} warnings]",
+        format!("{}", "incorrect proof".bold()),
         stats.time_trimming.duration_since(stats.time_start).as_secs(),
         errors,
         warnings);

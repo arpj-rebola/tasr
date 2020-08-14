@@ -1,5 +1,5 @@
 use crate::{
-    assignment::{InsertionTest, BacktrackBlock, Substitution},
+    assignment::{InsertionTest, Block, Substitution},
     chaindb::{ChainDb},
     clausedb::{ClauseDb},
     basic::{ClauseIndex, WitnessContainer},
@@ -26,10 +26,10 @@ impl Propagation {
     pub fn null(&self) -> bool {
         self.lit == Literal::Top
     }
-    pub fn propagate<'a, R: IntoIterator<Item = &'a Literal>>(rf: R, block: &BacktrackBlock) -> Propagation {
+    pub fn propagate<'a, R: IntoIterator<Item = &'a Literal>>(rf: R, block: &Block) -> Propagation {
         let mut prop = Propagation { lit: Literal::Bottom };
         for &lit in rf {
-			match (block.test(lit), prop.lit) {
+			match (block.check(lit), prop.lit) {
                 (InsertionTest::Conflict, _) => (),
                 (InsertionTest::Alright, Literal::Bottom) => prop.lit = lit,
                 _ => prop.lit = Literal::Top,
@@ -58,7 +58,7 @@ impl PropagationResult {
 }
 
 pub struct UnitPropagator<'a> {
-    block: &'a mut BacktrackBlock,
+    block: &'a mut Block,
     db: &'a ClauseDb,
     subst: &'a mut Substitution,
     chain: &'a mut ChainDb,
@@ -66,7 +66,7 @@ pub struct UnitPropagator<'a> {
 }
 impl<'a> UnitPropagator<'a> {
     pub fn new<'b: 'a, 'c: 'a, 'd: 'a, 's: 'a>(
-        block: &'b mut BacktrackBlock,
+        block: &'b mut Block,
         chain: &'c mut ChainDb,
         db: &'d ClauseDb,
         subst: &'s mut Substitution,
@@ -85,7 +85,7 @@ impl<'a> UnitPropagator<'a> {
         } else {
             self.propagate_rup(id)
         };
-        self.block.clear();
+        self.block.backtrack(Block::Restart);
         result
     }
     fn propagate_rup(&mut self, id: ClauseIndex) -> Option<()> {
@@ -191,7 +191,7 @@ mod test {
     };
 	use rand::{self, Rng};
 	use crate::{
-        assignment::{BacktrackBlock, InsertionTest},
+        assignment::{Block, InsertionTest},
         unitpropagation::{Propagation},
         variable::{Variable, Literal},
     };
@@ -201,7 +201,7 @@ mod test {
         let mut rng = rand::thread_rng();
         let minvar = Variable::try_from(1i64).unwrap();
         let maxvar = Variable::try_from(100i64).unwrap();
-        let mut block = BacktrackBlock::new();
+        let mut block = Block::new();
         for _ in 0usize..100usize {
             let length = rng.gen_range(0usize, 12usize);
             let mut clause = Vec::<Literal>::new();
@@ -211,7 +211,7 @@ mod test {
                     clause.push(lit);
                 }
             }
-            block.clear();
+            block.backtrack(Block::Restart);
             for _ in 0usize..100usize {
                 for _ in 0usize..50usize {
                     let lit = Literal::random(&mut rng, Some(minvar), maxvar);
@@ -222,11 +222,13 @@ mod test {
                 let mut taut = false;
                 let mut last = Literal::Bottom;
                 for lit in &clause {
-                    if block.check(*lit) {
-                        taut = true;
-                    } else if !block.check(lit.complement()) {
-                        last = *lit;
-                        count += 1usize;
+                    match block.check(*lit) {
+                        InsertionTest::Repeated => taut = true,
+                        InsertionTest::Alright => {
+                            last = *lit;
+                            count += 1usize;   
+                        },
+                        InsertionTest::Conflict => (),
                     }
                 }
                 if taut || count > 1usize {
@@ -236,7 +238,7 @@ mod test {
                 } else {
                     assert!(prop.conflict())
                 }
-                block.clear();
+                block.backtrack(Block::Restart);
             }
         }
     }

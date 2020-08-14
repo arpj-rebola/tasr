@@ -5,7 +5,6 @@ extern crate lazy_static;
 
 pub mod hasher;
 pub mod bst;
-pub mod chunkdb;
 pub mod input;
 #[macro_use]
 pub mod logger;
@@ -67,7 +66,6 @@ pub struct AppConfig {
     pub core_limit: usize,
     pub proof_limit: usize,
     pub trimming: Trimming,
-	pub permissive: bool,
     pub print_stats: bool,
 }
 
@@ -163,10 +161,6 @@ fn build_cli_parser<'a, 'b>() -> App<'a, 'b> {
             .requires("OUTPUT")
             .possible_values(&["plain", "zst", "gz", "bz2", "xz", "lz4"])
             .help("writes output ASR proof in the given compression format"))
-        .arg(Arg::with_name("PERMISSIVE")
-            .long("permissive")
-            .takes_value(false)
-            .help("admits some format variations not belonging to the ASR standard"))
         .arg(Arg::with_name("ADMIT_CORE")
             .long("admit-core")
             .takes_value(false)
@@ -199,7 +193,6 @@ fn build_cli_parser<'a, 'b>() -> App<'a, 'b> {
             .long("cleanup")
             .takes_value(false)
             .requires("OUTPUT")
-            .requires("PERMISSIVE")
             .help("outputs a cleaned-up ASR proof (i.e. tries to fix uncompliant proofs)"))
         .arg(Arg::with_name("OUTPUT")
             .long("output")
@@ -260,7 +253,6 @@ fn parse_cli_arguments<'a, 'b>(app: App<'a, 'b>) -> ClapResult<AppConfig> {
     let cnf_compression = CompressionFormat::try_from(args.value_of("CNF_COMPRESSION")).unwrap();
     let asr_compression = CompressionFormat::try_from(args.value_of("ASR_COMPRESSION")).unwrap();
     let fix_compression = CompressionFormat::try_from(args.value_of("OUTPUT_COMPRESSION")).unwrap();
-    let permissive = args.is_present("PERMISSIVE");
     let check_core = !args.is_present("ADMIT_CORE");
     let check_derivation = !args.is_present("ADMIT_DERIVATION");
     let check_refutation = !args.is_present("ADMIT_REFUTATION");
@@ -302,7 +294,6 @@ fn parse_cli_arguments<'a, 'b>(app: App<'a, 'b>) -> ClapResult<AppConfig> {
         core_limit: core_limit,
         proof_limit: proof_limit,
         trimming: trimming,
-        permissive: permissive,
         print_stats: stats,
     })
 }
@@ -373,7 +364,6 @@ fn check_proof(config: &AppConfig, cnf: &mut dyn AsrParser, asr: &mut dyn AsrPar
         check_refutation: config.check_refutation,
         core_limit: config.core_limit,
         proof_limit: config.proof_limit,
-        permissive: config.permissive,
         trimming: config.trimming,
         output: error,
     };

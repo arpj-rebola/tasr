@@ -41,66 +41,37 @@ impl Display for SectionError {
 	}
 }
 
-/// Error structure for `VerificationFailure::MissingCnfSection`, `VerificationFailure::MissingCoreSection`, `VerificationFailure::MissingProofSection`, `VerificationFailure::DuplicatedCnfSection`, `VerificationFailure::DuplicatedCoreSection` and `VerificationFailure::DuplicatedProofSection`.
 #[derive(Debug)]
 pub struct WrongSection {
-	/// Missing or duplicated header string.
 	header: String,
-	/// Position at which a duplicated header is found, or a header is concluded to be missing.
 	format: String,
 	pos: SourcePosition,
 	issue: SectionError,
 }
 
 #[derive(Debug)]
-pub struct ClauseIssues {
-	clause: ClauseContainer,
-	issues: Vec<(Literal, bool)>,
-}
-impl ClauseIssues {
-	pub fn serious(&self) -> bool {
-		self.issues.iter().all(|(_, rep)| *rep)
-	}
-	pub fn is_ok(&self, permissive: bool) -> bool {
-		permissive && !self.serious()
-	}
-}
-
-#[derive(Debug)]
-pub struct ClauseIssuesBuilder(Option<Box<ClauseIssues>>);
+pub struct ClauseIssuesBuilder(Option<Box<ClauseContainer>>);
 impl ClauseIssuesBuilder {
 	pub fn new() -> ClauseIssuesBuilder {
 		ClauseIssuesBuilder(None)
 	}
 	pub fn set<F>(&mut self, init: F) where
-		F: FnOnce() -> ClauseContainer
+		F: FnOnce() -> Vec<Literal>
 	{
 		if self.0.is_none() {
-			self.0 = Some(Box::new(ClauseIssues {
-				clause: init(),
-				issues: Vec::new(),
-			}));
+			self.0 = Some(Box::new(ClauseContainer(init())));
 		}
 	}
 	pub fn push_literal(&mut self, lit: Literal) {
 		match &mut self.0 {
 			None => (),
-			Some(bx) => bx.clause.0.push(lit),
+			Some(bx) => bx.0.push(lit),
 		}
 	}
-	pub fn push_issue(&mut self, lit: Literal, rep: bool) {
-		match &mut self.0 {
-			None => (),
-			Some(bx) => bx.issues.push((lit, rep)),
-		}
+	pub fn is_ok(&self) -> bool {
+		self.0.is_none()
 	}
-	pub fn is_ok(&self, permissive: bool) -> bool {
-		match &self.0 {
-			None => true,
-			Some(bx) => bx.is_ok(permissive),
-		}
-	}
-	pub fn extract(self) -> Option<Box<ClauseIssues>> {
+	pub fn extract(self) -> Option<Box<ClauseContainer>> {
 		self.0
 	}
 }
@@ -112,52 +83,29 @@ pub struct InvalidClause {
 	kind: String,
 	format: String,
 	clause: ClauseContainer,
-	issues: Vec<(Literal, bool)>,
 }
 
 #[derive(Debug)]
-pub struct WitnessIssues {
-	witness: WitnessContainer,
-	issues: Vec<(Variable, Literal, bool)>,
-}
-impl WitnessIssues {
-	pub fn serious(&self) -> bool {
-		self.issues.iter().all(|(_, _, rep)| *rep)
-	}
-	pub fn is_ok(&self, permissive: bool) -> bool {
-		permissive && !self.serious()
-	}
-}
-
-#[derive(Debug)]
-pub struct WitnessIssuesBuilder(Option<Box<WitnessIssues>>);
+pub struct WitnessIssuesBuilder(Option<Box<(WitnessContainer, bool)>>);
 impl WitnessIssuesBuilder {
 	pub fn new() -> WitnessIssuesBuilder {
 		WitnessIssuesBuilder(None)
 	}
-	pub fn set<F>(&mut self, init: F) where
+	pub fn set<F>(&mut self, init: F, conflict: bool) where
 		F: FnOnce() -> WitnessContainer
 	{
-		if self.0.is_none() {
-			self.0 = Some(Box::new(WitnessIssues {
-				witness: init(),
-				issues: Vec::new(),
-			}));
+		match &mut self.0 {
+			None => self.0 = Some(Box::new((init(), conflict))),
+			Some(bx) => bx.1 |= conflict,
 		}
 	}
 	pub fn push_mapping(&mut self, var: Variable, lit: Literal) {
 		match &mut self.0 {
 			None => (),
-			Some(bx) => bx.witness.0.push((var, lit)),
+			Some(bx) => (bx.0).0.push((var, lit)),
 		}
 	}
-	pub fn push_issue(&mut self, var: Variable, lit: Literal, rep: bool) {
-		match &mut self.0 {
-			None => (),
-			Some(bx) => bx.issues.push((var, lit, rep)),
-		}
-	}
-	pub fn extract(self) -> Option<Box<WitnessIssues>> {
+	pub fn extract(self) -> Option<Box<(WitnessContainer, bool)>> {
 		self.0
 	}
 }
@@ -167,7 +115,7 @@ pub struct InvalidWitness {
 	num: usize,
 	pos: SourcePosition,
 	witness: WitnessContainer,
-	issues: Vec<(Variable, Literal, bool)>,
+	conflict: bool,
 	format: String,
 }
 
@@ -199,7 +147,7 @@ impl PropagationIssues {
 			Some(chn) => {
 				let mut outchain = Vec::new();
 				for cid in chn {
-					outchain.push((db.extract(*cid), *cid, None));
+					outchain.push((db.extract(*cid).map(|x| ClauseContainer(x)), *cid, None));
 				}
 				outchain
 			},
@@ -316,15 +264,11 @@ pub enum VerificationFailure {
 	IncorrectNumClauses(Box<IncorrectCnfStats<usize>>),
 	WrongSection(Box<WrongSection>),
 	InvalidClause(Box<InvalidClause>),
-	UncompliantClause(Box<InvalidClause>),
 	InvalidWitness(Box<InvalidWitness>),
-	UncompliantWitness(Box<InvalidWitness>),
 	ConflictId(Box<ConflictId>),
 	IncorrectCore(Box<ConflictId>),
 	IncorrectRup(Box<IncorrectChain>),
 	IncorrectWsr(Box<IncorrectChain>),
-	UncompliantRup(Box<IncorrectChain>),
-	UncompliantWsr(Box<IncorrectChain>),
 	InvalidLaterals(Box<InvalidLaterals>),
 	MissingDeletion(Box<MissingDeletion>),
 	Unrefuted(Box<RefutationError>),
@@ -408,48 +352,36 @@ impl VerificationFailure {
 			issue: SectionError::Misplaced,
 		}))
 	}
-	fn invalid_clause(pos: SourcePosition, num: usize, issues: Box<ClauseIssues>, format: &str, kind: &str, numbering: &str) -> VerificationFailure {
-		let serious = issues.serious();
+	fn invalid_clause(pos: SourcePosition, num: usize, clause: Box<ClauseContainer>, format: &str, kind: &str, numbering: &str) -> VerificationFailure {
 		let bx = Box::<InvalidClause>::new(InvalidClause {
 			num: (num, numbering.to_string()),
 			pos: pos,
 			kind: kind.to_string(),
 			format: format.to_string(),
-			clause: issues.clause,
-			issues: issues.issues,
+			clause: *clause,
 		});
-		if serious {
-			VerificationFailure::InvalidClause(bx)
-		} else {
-			VerificationFailure::UncompliantClause(bx)
-		}
+		VerificationFailure::InvalidClause(bx)
 	}
-	pub fn invalid_premise(pos: SourcePosition, num: usize, issues: Box<ClauseIssues>) -> VerificationFailure {
-		VerificationFailure::invalid_clause(pos, num, issues, "CNF", "premise", "premise")
+	pub fn invalid_premise(pos: SourcePosition, num: usize, clause: Box<ClauseContainer>) -> VerificationFailure {
+		VerificationFailure::invalid_clause(pos, num, clause, "CNF", "premise", "premise")
 	}
-	pub fn invalid_core(pos: SourcePosition, num: usize, issues: Box<ClauseIssues>) -> VerificationFailure {
-		VerificationFailure::invalid_clause(pos, num, issues, "ASR", "core", "core")
+	pub fn invalid_core(pos: SourcePosition, num: usize, clause: Box<ClauseContainer>) -> VerificationFailure {
+		VerificationFailure::invalid_clause(pos, num, clause, "ASR", "core", "core")
 	}
-	pub fn invalid_rup(pos: SourcePosition, num: usize, issues: Box<ClauseIssues>) -> VerificationFailure {
-		VerificationFailure::invalid_clause(pos, num, issues, "ASR", "RUP inference", "inference")
+	pub fn invalid_rup(pos: SourcePosition, num: usize, clause: Box<ClauseContainer>) -> VerificationFailure {
+		VerificationFailure::invalid_clause(pos, num, clause, "ASR", "RUP inference", "inference")
 	}
-	pub fn invalid_wsr(pos: SourcePosition, num: usize, issues: Box<ClauseIssues>) -> VerificationFailure {
-		VerificationFailure::invalid_clause(pos, num, issues, "ASR", "WSR inference", "inference")
+	pub fn invalid_wsr(pos: SourcePosition, num: usize, clause: Box<ClauseContainer>) -> VerificationFailure {
+		VerificationFailure::invalid_clause(pos, num, clause, "ASR", "WSR inference", "inference")
 	}
-	pub fn invalid_witness(pos: SourcePosition, num: usize, issues: Box<WitnessIssues>) -> VerificationFailure {
-		let serious = issues.serious();
-		let bx = Box::<InvalidWitness>::new(InvalidWitness {
+	pub fn invalid_witness(pos: SourcePosition, num: usize, issues: Box<(WitnessContainer, bool)>) -> VerificationFailure {
+		VerificationFailure::InvalidWitness(Box::<InvalidWitness>::new(InvalidWitness {
 			num: num,
 			pos: pos,
-			witness: issues.witness,
-			issues: issues.issues,
+			witness: issues.0,
+			conflict: issues.1,
 			format: "ASR".to_string(),
-		});
-		if serious {
-			VerificationFailure::InvalidWitness(bx)
-		} else {
-			VerificationFailure::UncompliantWitness(bx)
-		}
+		}))
 	}
 	pub fn conflict_id(pos: SourcePosition, num: usize, id: ClauseIndex, clause: ClauseContainer, format: &str, kind: &str, numbering: &str) -> VerificationFailure {
 		VerificationFailure::ConflictId(Box::<ConflictId>::new(ConflictId {
@@ -481,7 +413,6 @@ impl VerificationFailure {
 		}))
 	}
 	pub fn incorrect_rup(pos: SourcePosition, num: usize, clause: ClauseContainer, chain: PropagationIssues) -> VerificationFailure {
-		let serious = chain.serious();
 		let bx = Box::<IncorrectChain>::new(IncorrectChain {
 			num: num,
 			clause: clause,
@@ -492,14 +423,9 @@ impl VerificationFailure {
 			pos: pos,
 			format: "ASR".to_string(),
 		});
-		if serious {
-			VerificationFailure::IncorrectRup(bx)
-		} else {
-			VerificationFailure::UncompliantRup(bx)
-		}
+		VerificationFailure::IncorrectRup(bx)
 	}
 	pub fn incorrect_wsr(pos: SourcePosition, num: usize, clause: ClauseContainer, chain: PropagationIssues, latid: Option<ClauseIndex>, latclause: ClauseContainer, witness: WitnessContainer) -> VerificationFailure {
-		let serious = chain.serious();
 		let bx = Box::<IncorrectChain>::new(IncorrectChain {
 			num: num,
 			clause: clause,
@@ -510,11 +436,7 @@ impl VerificationFailure {
 			pos: pos,
 			format: "ASR".to_string(),
 		});
-		if serious {
-			VerificationFailure::IncorrectWsr(bx)
-		} else {
-			VerificationFailure::UncompliantWsr(bx)
-		}
+		VerificationFailure::IncorrectWsr(bx)
 	}
 	pub fn invalid_laterals(pos: SourcePosition, num: usize, clause: ClauseContainer, lats: Box<Vec<(ClauseIndex, bool)>>) -> VerificationFailure {
 		VerificationFailure::InvalidLaterals(Box::<InvalidLaterals>::new(InvalidLaterals {
@@ -545,19 +467,15 @@ impl VerificationFailure {
 			VerificationFailure::IncorrectNumVariables(_) |
 			VerificationFailure::IncorrectNumClauses(_) |
 			VerificationFailure::WrongSection(_) |
-			VerificationFailure::UncompliantClause(_) |
-			VerificationFailure::UncompliantWitness(_) |
-			VerificationFailure::MissingDeletion(_) |
-			VerificationFailure::UncompliantRup(_) |
-			VerificationFailure::InvalidLaterals(_) |
-			VerificationFailure::UncompliantWsr(_) => false,
 			VerificationFailure::InvalidClause(_) |
-			VerificationFailure::InvalidWitness(_) |
+			VerificationFailure::MissingDeletion(_) |
+			VerificationFailure::InvalidLaterals(_) => false,
 			VerificationFailure::ConflictId(_) |
 			VerificationFailure::IncorrectCore(_) |
-			VerificationFailure::Unrefuted(_) |
-			VerificationFailure::IncorrectRup(_) |
-			VerificationFailure::IncorrectWsr(_) => true,
+			VerificationFailure::Unrefuted(_) => true,
+			VerificationFailure::IncorrectRup(bx) |
+			VerificationFailure::IncorrectWsr(bx) => bx.chain.serious(),
+			VerificationFailure::InvalidWitness(bx) => bx.conflict,
 		}
 	}
 }
@@ -579,31 +497,21 @@ impl Display for VerificationFailure {
 				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tSection header '{}' is {}.\n", &bx.header, &bx.issue)
 			},
-			VerificationFailure::InvalidClause(bx) | VerificationFailure::UncompliantClause(bx) => {
+			VerificationFailure::InvalidClause(bx) => {
 				write!(f, "{}{}{}\n", "Invalid ".white().bold(), format!("{}", &bx.kind).white().bold(), " clause".white().bold())?;
 				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
-				write!(f, "\tClause {} at {} position #{} is invalid because:\n", format!("{}", &bx.clause).bold().yellow(), &bx.num.1, &bx.num.0)?;
-				for (lit, rep) in &bx.issues {
-					if *rep {
-						write!(f, "\t- Literal {} is repeated\n", lit)?;
-					} else {
-						write!(f, "\t- Literal {} is inconsistent with literal {}\n", lit, lit.complement())?;
-					}
-				}
+				write!(f, "\tClause {} at {} position #{} is invalid because it contains repeated literals.\n", format!("{}", &bx.clause).bold().yellow(), &bx.num.1, &bx.num.0)?;
 				Ok(())
 			},
-			VerificationFailure::InvalidWitness(bx) | VerificationFailure::UncompliantWitness(bx) => {
+			VerificationFailure::InvalidWitness(bx) => {
 				write!(f, "{}\n", "Invalid WSR witness".white().bold())?;
 				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
-				write!(f, "\tWitness {} for WSR inference at inference position #{} is invalid because:\n", format!("{}", &bx.witness).bold().magenta(), &bx.num)?;
-				for (var, lit, rep) in &bx.issues {
-					if *rep {
-						write!(f, "\t- Mapping {} -> {} is repeated\n", var, lit)?;
-					} else {
-						write!(f, "\t- Mapping {} -> {} is inconsistent with a previous mapping\n", var, lit)?;
-					}
+				write!(f, "\tWitness {} for WSR inference at inference position #{} is invalid because it contains ", format!("{}", &bx.witness).bold().magenta(), &bx.num)?;
+				if bx.conflict {
+					write!(f, "conflicting mappings.\n")
+				} else {
+					write!(f, "repeated mappings.\n")
 				}
-				Ok(())
 			},
 			VerificationFailure::ConflictId(bx) => {
 				write!(f, "{}\n", "Conflicting clause identifier".white().bold())?;
@@ -617,7 +525,7 @@ impl Display for VerificationFailure {
 				write!(f, "\tThe clause {} is introduced as a core clause ", format!("{}", &bx.clause).bold().yellow())?;
 				write!(f, "with clause identifier {} at core position #{}, but was not found among the premises.\n", &bx.id, &bx.num.0)
 			},
-			VerificationFailure::IncorrectRup(bx) | VerificationFailure::UncompliantRup(bx) => {
+			VerificationFailure::IncorrectRup(bx) => {
 				write!(f, "{}\n", "Incorrect RUP introduction".white().bold())?;
 				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tThe clause {} is introduced as a RUP inference clause ", format!("{}", &bx.clause).bold().yellow())?;
@@ -646,7 +554,7 @@ impl Display for VerificationFailure {
 				}
 				Ok(())
 			},
-			VerificationFailure::IncorrectWsr(bx) | VerificationFailure::UncompliantWsr(bx) => {
+			VerificationFailure::IncorrectWsr(bx) => {
 				write!(f, "{}\n", "Incorrect WSR introduction".white().bold())?;
 				write!(f, "{}{} ({} format)\n", "  --> ".bold().blue(), format!("{}", &bx.pos).bold().blue(), &bx.format)?;
 				write!(f, "\tThe clause {} is introduced as a WSR inference clause ", format!("{}", &bx.clause).bold().yellow())?;
@@ -719,20 +627,16 @@ pub type VerificationResult<T> = Result<T, VerificationFailure>;
 
 pub struct ErrorStorage {
 	vec: Vec<VerificationFailure>,
-	permissive: bool,
 }
 impl ErrorStorage {
-	pub fn new(permissive: bool) -> ErrorStorage {
-		ErrorStorage {
-			vec: Vec::new(),
-			permissive: permissive,
-		}
+	pub fn new() -> ErrorStorage {
+		ErrorStorage { vec: Vec::new() }
 	}
 	pub fn push_error(&mut self, handle: LoggerHandle<'_, '_>, error: VerificationFailure) {
-		if self.permissive && !error.serious() {
-			log_warning!(handle, target: "Warning"; "{}", &error);
-		} else {
+		if error.serious() {
 			log_error!(handle, target: "Error"; "{}", &error);
+		} else {
+			log_warning!(handle, target: "Warning"; "{}", &error);
 		}
 		self.vec.push(error);
 	}
@@ -740,10 +644,10 @@ impl ErrorStorage {
 		let mut warnings = 0usize;
 		let mut errors = 0usize;
 		for err in &self.vec {
-			if self.permissive && !err.serious() {
-				warnings += 1usize;
-			} else {
+			if err.serious() {
 				errors += 1usize;
+			} else {
+				warnings += 1usize;
 			}
 		}
 		(warnings, errors)

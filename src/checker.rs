@@ -8,13 +8,13 @@ use colored::{
 };
 
 use crate::{
-	assignment::{InsertionTest, BacktrackBlock, Substitution},
-	basic::{CnfHeaderStats, WitnessContainer, ClauseIndex},
+	assignment::{InsertionTest, Block, Substitution, LiteralSet},
+	basic::{CnfHeaderStats, WitnessContainer, ClauseIndex, ClauseContainer},
 	chaindb::{ChainDb},
-	clausedb::{ClauseDb, ClauseSet, ClauseDbMeta},
+	clausedb::{ClauseDb, ClauseSet},
 	input::{Positioned, StreamPosition},
 	parser::{AsrParser, AsrInstructionKind},
-	results::{VerificationFailure, ErrorStorage, ClauseIssuesBuilder, ClauseIssues, ChainIssuesBuilder, PropagationIssues, WitnessIssuesBuilder, WitnessIssues},
+	results::{VerificationFailure, ErrorStorage, ClauseIssuesBuilder, ChainIssuesBuilder, PropagationIssues, WitnessIssuesBuilder},
 	unitpropagation::{UnitPropagator},
 	variable::{MaybeVariable},
 	logger::{Logger, LoggerId},
@@ -44,7 +44,7 @@ pub struct CheckerStats {
 	pub time_trimming: Instant,
 }
 impl CheckerStats {
-	fn new(permissive: bool) -> CheckerStats {
+	fn new() -> CheckerStats {
 		let now = Instant::now();
 		CheckerStats {
 			max_variable: MaybeVariable::None,
@@ -56,7 +56,7 @@ impl CheckerStats {
 			num_deletions: 0usize,
 			num_dels: 0usize,
 			num_contradictions: 0usize,
-			errors: ErrorStorage::new(permissive),
+			errors: ErrorStorage::new(),
 			time_start: now,
 			time_core: now,
 			time_derivation: now,
@@ -112,7 +112,6 @@ pub struct CheckerConfig {
 	pub check_refutation: bool,
 	pub core_limit: usize,
 	pub proof_limit: usize,
-	pub permissive: bool,
 	pub trimming: Trimming,
 	pub output: LoggerId,
 }
@@ -135,18 +134,16 @@ impl<'a, 'b: 'a> AsrChecker<'a, 'b> {
 		logger: &'f mut Logger<'b>,
 		config: CheckerConfig,
 	) -> AsrChecker<'a, 'b> {
-		let permissive = config.permissive;
 		AsrChecker::<'a, 'b> {
 			cnf: cnf,
 			asr: asr,
 			config: config,
 			logger: logger,
 			db: ClauseDb::new(),
-			stats: CheckerStats::new(permissive),
+			stats: CheckerStats::new(),
 		}
 	}
 	pub fn check(mut self) -> CheckerStats {
-		let mut block = BacktrackBlock::new();
 		{
 			let mut set = ClauseSet::new();
 			{
@@ -155,7 +152,7 @@ impl<'a, 'b: 'a> AsrChecker<'a, 'b> {
 					config: &mut self.config,
 					logger: &mut *self.logger,
 					set: &mut set,
-					block: &mut block,
+					lits: LiteralSet::new(),
 					stats: &mut self.stats,
 				};
 				premise_checker.check();
@@ -167,7 +164,7 @@ impl<'a, 'b: 'a> AsrChecker<'a, 'b> {
 					logger: &mut *self.logger,
 					db: &mut self.db,
 					set: &mut set,
-					block: &mut block,
+					block: LiteralSet::new(),
 					stats: &mut self.stats,
 				};
 				core_checker.check();
@@ -180,8 +177,9 @@ impl<'a, 'b: 'a> AsrChecker<'a, 'b> {
 				config: &mut self.config,
 				logger: &mut *self.logger,
 				db: &mut self.db,
-				block: &mut block,
 				stats: &mut self.stats,
+				block: Block::new(),
+				lits: LiteralSet::new(),
 				chain: ChainDb::new(),
 				subst: Substitution::new(),
 			};
@@ -197,7 +195,7 @@ pub struct AsrPremiseChecker<'a, 'b: 'a> {
 	config: &'a CheckerConfig,
 	logger: &'a mut Logger<'b>,
 	set: &'a mut ClauseSet,
-	block: &'a mut BacktrackBlock,
+	lits: LiteralSet,
 	stats: &'a mut CheckerStats,
 }
 impl<'a, 'b: 'a> AsrPremiseChecker<'a, 'b> {
@@ -236,23 +234,18 @@ impl<'a, 'b: 'a> AsrPremiseChecker<'a, 'b> {
 		}
 		self.logger.flush(self.config.output);
 	}
-	fn parse_clause(&mut self) -> Option<Box<ClauseIssues>> {
+	fn parse_clause(&mut self) -> Option<Box<ClauseContainer>> {
 		let mut issues = ClauseIssuesBuilder::new();
-		{
-			let mut writer = self.set.open(unsafe { self.block.mut_block() });
-			while let Some(lit) = &self.cnf.parse_clause() {
-				self.stats.max_variable |= unsafe { lit.variable_unchecked() };
-				let test = writer.write(*lit);
-				if test != InsertionTest::Alright {
-					issues.set(|| writer.extract());
-					issues.push_issue(*lit, test == InsertionTest::Repeated);
-				}
-				issues.push_literal(*lit);
+		let mut writer = self.set.open(&mut self.lits);
+		while let Some(lit) = &self.cnf.parse_clause() {
+			self.stats.max_variable |= unsafe { lit.variable_unchecked() };
+			let test = writer.write(*lit);
+			if !test {
+				issues.set(|| writer.extract());
 			}
-			if issues.is_ok(self.config.permissive) {
-				writer.close()
-			}
+			issues.push_literal(*lit);
 		}
+		writer.close();
 		issues.extract()
 	}
 	fn process_error(&mut self, err: VerificationFailure) {
@@ -283,7 +276,7 @@ impl<'a, 'b: 'a> AsrPremiseChecker<'a, 'b> {
 		let err = VerificationFailure::incorrect_num_clauses(pos, vars, stat);
 		self.process_error(err);
 	}
-	fn error_invalid_clause(&mut self, pos: &StreamPosition, issues: Box<ClauseIssues>) {
+	fn error_invalid_clause(&mut self, pos: &StreamPosition, issues: Box<ClauseContainer>) {
 		let num = self.stats.num_premises;
 		let pos = pos.source(self.cnf.name());
 		let err = VerificationFailure::invalid_premise(pos, num, issues);
@@ -297,8 +290,8 @@ pub struct AsrCoreChecker<'a, 'b: 'a> {
 	logger: &'a mut Logger<'b>,
 	db: &'a mut ClauseDb,
 	set: &'a mut ClauseSet,
-	block: &'a mut BacktrackBlock,
 	stats: &'a mut CheckerStats,
+	block: LiteralSet,
 }
 impl<'a, 'b: 'a>  AsrCoreChecker<'a, 'b> {
 	pub fn check(mut self) {
@@ -311,9 +304,8 @@ impl<'a, 'b: 'a>  AsrCoreChecker<'a, 'b> {
 							let cls = match self.parse_clause(*id) {
 								Some(None) => true,
 								Some(Some(bx)) => {
-									let ok = bx.is_ok(self.config.permissive);
 									self.error_invalid_clause(pos, bx);
-									ok
+									true
 								},
 								None => {
 									self.error_conflict_id(pos, *id);
@@ -322,7 +314,7 @@ impl<'a, 'b: 'a>  AsrCoreChecker<'a, 'b> {
 							};
 							if cls && self.config.check_core {
 								let rf = self.db.retrieve(*id).unwrap();
-								let del = self.set.delete(&rf, unsafe { self.block.mut_block() });
+								let del = self.set.remove(&rf, &mut self.block);
 								if del.is_none() {
 									self.error_incorrect_core(pos, *id);
 								}
@@ -348,29 +340,23 @@ impl<'a, 'b: 'a>  AsrCoreChecker<'a, 'b> {
 		}
 		self.logger.flush(self.config.output);
 	}
-	fn parse_clause(&mut self, id: ClauseIndex) -> Option<Option<Box<ClauseIssues>>> {
+	fn parse_clause(&mut self, id: ClauseIndex) -> Option<Option<Box<ClauseContainer>>> {
 		let mut issues = ClauseIssuesBuilder::new();
-		match self.db.open(unsafe { self.block.mut_block() }, id) {
+		match self.db.open(&mut self.block, id) {
 			Some(mut writer) => {
 				while let Some(lit) = &self.asr.parse_clause() {
 					self.stats.max_variable |= unsafe { lit.variable_unchecked() };
 					let test = writer.write(*lit);
-					if test != InsertionTest::Alright {
+					if !test {
 						issues.set(|| writer.extract());
-						issues.push_issue(*lit, test == InsertionTest::Repeated);
 					}
 					issues.push_literal(*lit);
 				}
-				if issues.is_ok(self.config.permissive) {
-					if writer.length() == 0usize {
-						self.stats.num_contradictions += 1usize;
-					}
-					let meta = ClauseDbMeta {};
-					writer.close(meta);
-					Some(None)
-				} else {
-					Some(issues.extract())
+				let report = writer.close();
+				if report.is_contradiction() {
+					self.stats.num_contradictions += 1usize;
 				}
+				Some(issues.extract())
 			},
 			None => {
 				while let Some(_) = &self.asr.parse_clause() {
@@ -397,17 +383,17 @@ impl<'a, 'b: 'a>  AsrCoreChecker<'a, 'b> {
 		let pos = pos.source(self.asr.name());
 		let cls = self.db.extract(id).unwrap();
 		let num = self.stats.num_cores;
-		let err = VerificationFailure::incorrect_core(pos, num, id, cls);
+		let err = VerificationFailure::incorrect_core(pos, num, id, ClauseContainer(cls));
 		self.process_error(err);
 	}
 	fn error_conflict_id(&mut self, pos: &StreamPosition, id: ClauseIndex) {
 		let pos = pos.source(self.asr.name());
 		let cls = self.db.extract(id).unwrap();
 		let num = self.stats.num_cores;
-		let err = VerificationFailure::conflict_core_id(pos, num, id, cls);
+		let err = VerificationFailure::conflict_core_id(pos, num, id, ClauseContainer(cls));
 		self.process_error(err);
 	}
-	fn error_invalid_clause(&mut self, pos: &StreamPosition, issues: Box<ClauseIssues>) {
+	fn error_invalid_clause(&mut self, pos: &StreamPosition, issues: Box<ClauseContainer>) {
 		let num = self.stats.num_premises;
 		let pos = pos.source(self.asr.name());
 		let err = VerificationFailure::invalid_core(pos, num, issues);
@@ -420,8 +406,9 @@ pub struct AsrProofChecker<'a, 'b: 'a> {
 	config: &'a CheckerConfig,
 	logger: &'a mut Logger<'b>,
 	db: &'a mut ClauseDb,
-	block: &'a mut BacktrackBlock,
 	stats: &'a mut CheckerStats,
+	lits: LiteralSet,
+	block: Block,
 	chain: ChainDb,
 	subst: Substitution,
 }
@@ -468,7 +455,6 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 		self.logger.flush(self.config.output);
 	}
 	fn check_inference(&mut self, id: ClauseIndex, pos: &StreamPosition, wsr: bool) {
-		// println!("checking inference");
 		if wsr {
 			self.stats.num_wsrs += 1usize;
 		} else {
@@ -478,9 +464,8 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 			let cls = match self.parse_clause(id) {
 				Some(None) => true,
 				Some(Some(bx)) => {
-					let ok = bx.is_ok(self.config.permissive);
 					self.error_invalid_clause(pos, bx, wsr);
-					ok
+					true
 				},
 				None => {
 					self.error_conflict_id(pos, id, wsr);
@@ -491,7 +476,7 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 				match self.parse_witness() {
 					None => true,
 					Some(bx) => {
-						let ok = bx.is_ok(self.config.permissive);
+						let ok = bx.1;
 						self.error_invalid_witness(pos, bx);
 						ok
 					},
@@ -528,7 +513,6 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 		}
 	}
 	fn check_del(&mut self, pos: &StreamPosition) {
-		// println!("checking deletion");
 		self.stats.num_dels += 1usize;
 		if self.stats.num_proof_instructions() <= self.config.proof_limit {
 			while let Some(id) = &self.asr.parse_chain() {
@@ -549,29 +533,23 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 			}
 		}
 	}
-	fn parse_clause(&mut self, id: ClauseIndex) -> Option<Option<Box<ClauseIssues>>> {
+	fn parse_clause(&mut self, id: ClauseIndex) -> Option<Option<Box<ClauseContainer>>> {
 		let mut issues = ClauseIssuesBuilder::new();
-		match self.db.open(unsafe { self.block.mut_block() }, id) {
+		match self.db.open(&mut self.lits, id) {
 			Some(mut writer) => {
 				while let Some(lit) = &self.asr.parse_clause() {
 					self.stats.max_variable |= unsafe { lit.variable_unchecked() };
 					let test = writer.write(*lit);
-					if test != InsertionTest::Alright {
+					if !test {
 						issues.set(|| writer.extract());
-						issues.push_issue(*lit, test == InsertionTest::Repeated);
 					}
 					issues.push_literal(*lit);
 				}
-				if issues.is_ok(self.config.permissive) {
-					if writer.length() == 0usize {
-						self.stats.num_contradictions += 1usize;
-					}
-					let meta = ClauseDbMeta {};
-					writer.close(meta);
-					Some(None)
-				} else {
-					Some(issues.extract())
+				let report = writer.close();
+				if report.is_contradiction() {
+					self.stats.num_contradictions += 1usize;
 				}
+				Some(issues.extract())
 			},
 			None => {
 				while let Some(_) = &self.asr.parse_clause() {
@@ -580,15 +558,14 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 			},
 		}
 	}
-	fn parse_witness(&mut self) -> Option<Box<WitnessIssues>> {
+	fn parse_witness(&mut self) -> Option<Box<(WitnessContainer, bool)>> {
 		let mut issues = WitnessIssuesBuilder::new();
 		while let Some((var, lit)) = &self.asr.parse_witness() {
 			self.stats.max_variable |= *var;
 			lit.variable().map(|v| self.stats.max_variable |= v);
 			let test = self.subst.set(*var, *lit);
 			if test != InsertionTest::Alright {
-				issues.set(|| self.subst.extract());
-				issues.push_issue(*var, *lit, test == InsertionTest::Repeated);
+				issues.set(|| self.subst.extract(), test == InsertionTest::Conflict);
 			}
 			issues.push_mapping(*var, *lit);
 		}
@@ -605,14 +582,11 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 		}
 	}
 	fn parse_chain(&mut self, id: ClauseIndex, wsr: bool) -> Option<Box<Vec<(ClauseIndex, bool)>>> {
-		// println!("parsing chain");
 		let mut issues = ChainIssuesBuilder::new();
 		let mut lat = id;
 		let mut first = true;
 		loop {
-			// println!("parsing chain with lateral {}", lat);
 			if self.db.retrieve(lat).is_none() || (lat == id && !first) {
-				// println!("missing lateral id: {}", lat);
 				issues.push_issue(lat, id, false);
 				while let Some(_) = &self.asr.parse_chain() {
 				}
@@ -620,14 +594,12 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 				first = false;
 				match self.chain.open(lat) {
 					Some(mut writer) => {
-						// println!("lateral id ok");
 						while let Some(cid) = &self.asr.parse_chain() {
 							writer.write(*cid);
 						}
 						writer.close();
 					},
 					None => {
-						// println!("repeated lateral id: {}", lat);
 						issues.push_issue(lat, id, true);
 						while let Some(_) = &self.asr.parse_chain() {
 						}
@@ -669,13 +641,13 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 		let cls = self.db.extract(id).unwrap();
 		let num = self.stats.num_proof_instructions();
 		let err = if wsr {
-			VerificationFailure::conflict_wsr_id(pos, num, id, cls)
+			VerificationFailure::conflict_wsr_id(pos, num, id, ClauseContainer(cls))
 		} else {
-			VerificationFailure::conflict_rup_id(pos, num, id, cls)
+			VerificationFailure::conflict_rup_id(pos, num, id, ClauseContainer(cls))
 		};
 		self.process_error(err);
 	}
-	fn error_invalid_clause(&mut self, pos: &StreamPosition, issues: Box<ClauseIssues>, wsr: bool) {
+	fn error_invalid_clause(&mut self, pos: &StreamPosition, issues: Box<ClauseContainer>, wsr: bool) {
 		let num = self.stats.num_proof_instructions();
 		let pos = pos.source(self.asr.name());
 		let err = if wsr {
@@ -685,7 +657,7 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 		};
 		self.process_error(err);
 	}
-	fn error_invalid_witness(&mut self, pos: &StreamPosition, issues: Box<WitnessIssues>) {
+	fn error_invalid_witness(&mut self, pos: &StreamPosition, issues: Box<(WitnessContainer, bool)>) {
 		let pos = pos.source(self.asr.name());
 		let num = self.stats.num_proof_instructions();
 		let err = VerificationFailure::invalid_witness(pos, num, issues);
@@ -694,9 +666,8 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 	fn error_invalid_laterals(&mut self, pos: &StreamPosition, id: ClauseIndex, bx: Box<Vec<(ClauseIndex, bool)>>) {
 		let pos = pos.source(self.asr.name());
 		let num = self.stats.num_proof_instructions();
-		// println!("invalid lateral with id {}", id);
 		let cls = self.db.extract(id).unwrap();
-		let err = VerificationFailure::invalid_laterals(pos, num, cls, bx);
+		let err = VerificationFailure::invalid_laterals(pos, num, ClauseContainer(cls), bx);
 		self.process_error(err);
 	}
 	fn error_incorrect_inference(&mut self, pos: &StreamPosition, id: ClauseIndex, bx: Box<Vec<(ClauseIndex, PropagationIssues, WitnessContainer)>>, wsr: bool) {
@@ -711,9 +682,9 @@ impl<'a, 'b: 'a>  AsrProofChecker<'a, 'b> {
 					Some(lat)
 				};
 				let latclause = self.db.extract(id).unwrap();
-				VerificationFailure::incorrect_wsr(pos, num, cls, issues, latopt, latclause, witness)
+				VerificationFailure::incorrect_wsr(pos, num, ClauseContainer(cls), issues, latopt, ClauseContainer(latclause), witness)
 			} else {
-				VerificationFailure::incorrect_rup(pos, num, cls, issues)
+				VerificationFailure::incorrect_rup(pos, num, ClauseContainer(cls), issues)
 			};
 			self.process_error(err);
 		}

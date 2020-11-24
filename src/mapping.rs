@@ -1,9 +1,9 @@
 use std::{
-    collections::{BTreeSet},
+    collections::{BTreeSet, BTreeMap},
 };
 
 use crate::{
-    basic::{ClauseIndex, MaybeClauseIndex, Literal},
+    basic::{ClauseIndex, MaybeClauseIndex, Literal, InstructionNumber},
 };
 
 /// Representation of a set of literals.
@@ -70,6 +70,26 @@ impl LiteralSet {
 	}
 }
 
+pub struct InstructionLoader {
+    set: BTreeMap<ClauseIndex, InstructionNumber>,
+}
+impl InstructionLoader {
+    pub fn new() -> InstructionLoader {
+        InstructionLoader { set: BTreeMap::new() }
+    }
+    pub fn insert(&mut self, id: ClauseIndex, num: InstructionNumber) {
+        self.set.insert(id, num);
+    }
+    pub fn remove(&mut self, id: ClauseIndex) {
+        self.set.remove(&id);
+    }
+    pub fn extract(self) -> Vec<InstructionNumber> {
+        let mut vec: Vec<InstructionNumber> = self.set.values().copied().collect();
+        vec.sort();
+        vec
+    }
+}
+
 pub struct IndexMapping {
     mapping: Vec<Option<ClauseIndex>>,
     free: BTreeSet<ClauseIndex>,
@@ -115,7 +135,11 @@ impl IndexMapping {
         }
     }
     pub fn take(&mut self, id: ClauseIndex) -> Option<ClauseIndex> {
-        self.mapping.get_mut(id.index())?.take()
+        let opt = self.mapping.get_mut(id.index())?.take();
+        if let Some(nid) = opt {
+            self.free.insert(nid);
+        }
+        opt
     }
 }
 

@@ -147,7 +147,7 @@ pub struct PreprocessedFile {
 }
 impl PreprocessedFile {
     pub fn get(&mut self) -> OutputWriter<'_> {
-        let file = match OpenOptions::new().write(true).truncate(true).open(&self.out) {
+        let file = match OpenOptions::new().write(true).truncate(true).create(true).open(&self.out) {
             Ok(file) => file,
             Err(e) => PreprocessedFile::creation_error(&self.out, e),
         };

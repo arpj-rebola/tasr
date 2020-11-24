@@ -6,7 +6,7 @@ use crate::{
     formula::{Formula},
     proof::{Proof, ProofIterator, CoreIterator},
     mapping::{IndexSet},
-    basic::{InstructionNumber, ClauseIndex},
+    basic::{ClauseIndex},
     split::{PreprocessingStats, SplittingData},
 };
 
@@ -23,10 +23,11 @@ pub struct Trimmer {
     stats: PreprocessingStats,
 }
 impl Trimmer {
-    pub fn new(data: SplittingData) -> Option<Trimmer> {
+    pub fn new(data: SplittingData) -> Trimmer {
         let mut marks = IndexSet::new();
-        marks.set(data.stats.qed?);
-        Some(Trimmer {
+        marks.set(data.qed);
+        println!("marking {}", data.qed);
+        Trimmer {
             database: data.database,
             clausedb: ClauseDatabase,
             chaindb: ChainDatabase,
@@ -37,14 +38,14 @@ impl Trimmer {
             removals: Vec::new(),
             deletions: Vec::new(),
             stats: data.stats,
-        })
+        }
     }
     pub fn trim_fragment(&mut self, mut ps: TextAsrParser<'_>) -> ProofIterator<'_> {
         while let Some((ins, _)) = ps.parse_instruction() {
             match ins.kind {
-                AsrParsedInstructionKind::Rup => self.process_rup(&mut ps, ins.id, ins.num),
-                AsrParsedInstructionKind::Wsr => self.process_wsr(&mut ps, ins.id, ins.num),
-                AsrParsedInstructionKind::Del => self.process_del(&mut ps, ins.id, ins.num),
+                AsrParsedInstructionKind::Rup => self.process_rup(&mut ps, ins.id),
+                AsrParsedInstructionKind::Wsr => self.process_wsr(&mut ps, ins.id),
+                AsrParsedInstructionKind::Del => self.process_del(&mut ps, ins.id),
             }
         }
         self.proof.extract(&mut self.database, &mut self.removals)
@@ -57,28 +58,35 @@ impl Trimmer {
         self.stats.record_trimming_time();
         self.stats
     }
-    fn process_rup(&mut self, ps: &mut TextAsrParser<'_>, id: ClauseIndex, num: InstructionNumber) {
-        let (_, clause) = self.formula.remove(id).unwrap();
+    fn process_rup(&mut self, ps: &mut TextAsrParser<'_>, id: ClauseIndex) {
+        println!("processing a RUP {}", id);
+        let (num, clause) = self.formula.remove(id).unwrap();
         let mut chain_ps = ps.parse_chain();
         if self.marks.check_clear(id) {
+            println!("clearing {}", id);
             self.stats.num_intros += 1u64;
             let mut chain_wt = self.chaindb.open_chain(&mut self.database, None);
             while let Some(cid) = chain_ps.next() {
                 chain_wt.write(cid);
                 if !self.marks.check_set(cid) {
-                    self.proof.insert_del(cid, num);
+                    println!("marking {}", cid);
+                    self.proof.insert_del(cid);
+                    self.stats.num_instructions += 1u64;
                     self.stats.num_dels += 1u64;
                 }
             }
             let chain = chain_wt.close();
             self.proof.insert_rup(id, num, clause, chain);
+            self.stats.num_instructions += 1u64;
         } else {
             self.removals.push(clause);
         }
     }
-    fn process_wsr(&mut self, ps: &mut TextAsrParser<'_>, id: ClauseIndex, num: InstructionNumber) {
-        let (_, clause) = self.formula.remove(id).unwrap();
+    fn process_wsr(&mut self, ps: &mut TextAsrParser<'_>, id: ClauseIndex) {
+        println!("processing a WSR {}", id);
+        let (num, clause) = self.formula.remove(id).unwrap();
         if self.marks.check_clear(id) {
+            println!("clearing {}", id);
             self.stats.num_intros += 1u64;
             let mut witness_wt = self.chaindb.open_multichain(&mut self.database, None, &mut self.buffer);
             {
@@ -96,7 +104,7 @@ impl Trimmer {
                             let mut chain_wt = multichain_wt.proper_chain(lid);
                             while let Some(cid) = chain_ps.next() {
                                 chain_wt.write(cid);
-                                if !self.marks.check_set(cid) {
+                                if !self.marks.check(cid) {
                                     self.deletions.push(cid);
                                 }
                             }
@@ -108,11 +116,13 @@ impl Trimmer {
                 self.deletions.dedup();
                 self.stats.num_dels += self.deletions.len() as u64;
                 for &lid in &self.deletions {
+                    self.marks.set(lid);
                     multichain_wt.deleted_chain(lid, &self.formula);
                 }
                 self.deletions.clear();
                 let (mchain, _) = multichain_wt.close();
                 self.proof.insert_wsr(id, num, clause, mchain);
+                self.stats.num_instructions += 1u64;
             }
         } else {
             ps.parse_witness();
@@ -120,7 +130,9 @@ impl Trimmer {
             self.removals.push(clause);
         }
     }
-    fn process_del(&mut self, ps: &mut TextAsrParser<'_>, id: ClauseIndex, num: InstructionNumber) {
+    fn process_del(&mut self, ps: &mut TextAsrParser<'_>, id: ClauseIndex) {
+        println!("processing a DEL {}", id);
+        let num = ps.parse_instruction_number().unwrap();
         let mut clause_ps = ps.parse_clause();
         let mut clause_wt = self.clausedb.open(&mut self.database);
         while let Some(lit) = clause_ps.next() {

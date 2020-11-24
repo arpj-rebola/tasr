@@ -56,6 +56,12 @@ impl<'a> ClauseWriter<'a> {
 pub struct Clause<'a> {
     rf: Record<'a>
 }
+impl<'a> Clause<'a> {
+    #[inline(always)]
+    pub fn length(&self) -> usize {
+        self.rf.length()
+    }
+}
 impl<'a> IntoIterator for Clause<'a> {
     type Item = &'a Literal;
     type IntoIter = ClauseIterator<'a>;

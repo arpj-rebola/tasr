@@ -3,7 +3,7 @@ use std::{
     mem::{self, MaybeUninit, ManuallyDrop},
 };
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct DatabaseAddress {
     main: u8,
     sub: NonZeroU32,

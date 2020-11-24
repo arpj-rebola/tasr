@@ -113,7 +113,7 @@ impl<'a, I> Display for SubstitutionDisplay<'a, I> where
             }
             write!(f, "{} -> {}", var, lit)?;
         }
-        Ok(())
+        write!(f, "}}")
     }
 }
 

@@ -16,12 +16,9 @@ use crate::{
 pub struct CoreInstruction<'a>(ClauseIndex, InstructionNumber, Clause<'a>);
 impl<'a> Display for CoreInstruction<'a> {
     fn fmt(&self , f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "k {}", self.0)?;
-        if let Some(n) = self.1.offset() {
-            write!(f, "l {}", n.get())?;
-        }
+        write!(f, "k {} {} ", self.0.text(), self.1.text())?;
         for lit in self.2 {
-            write!(f, "{} ", lit)?;
+            write!(f, "{} ", lit.text())?;
         }
         write!(f, "0\n")
     }
@@ -63,7 +60,7 @@ impl<'a> CoreIterator<'a> {
 enum DirectInstruction {
     Rup(ClauseIndex, InstructionNumber, ClauseAddress, ChainAddress),
     Wsr(ClauseIndex, InstructionNumber, ClauseAddress, MultichainAddress),
-    Del(ClauseIndex, InstructionNumber),
+    Del(ClauseIndex),
 }
 
 #[repr(transparent)]
@@ -80,8 +77,8 @@ impl Proof {
     pub fn insert_wsr(&mut self, nid: ClauseIndex, num: InstructionNumber, clause: ClauseAddress, mchain: MultichainAddress) {
         self.vec.push(DirectInstruction::Wsr(nid, num, clause, mchain))
     }
-    pub fn insert_del(&mut self, nid: ClauseIndex, num: InstructionNumber) {
-        self.vec.push(DirectInstruction::Del(nid, num))
+    pub fn insert_del(&mut self, nid: ClauseIndex) {
+        self.vec.push(DirectInstruction::Del(nid))
     }
     pub fn extract<'a, 'b: 'a, 'c: 'a, 'd: 'a>(&'b mut self, db: &'c mut Database, removals: &'d mut Vec<ClauseAddress>) -> ProofIterator<'a> {
         let len = self.vec.len();
@@ -99,61 +96,52 @@ impl Proof {
 pub enum DirectProofInstruction<'a> {
     Rup(ClauseIndex, InstructionNumber, Clause<'a>, Chain<'a>),
     Wsr(ClauseIndex, InstructionNumber, Clause<'a>, Multichain<'a>),
-    Del(ClauseIndex, InstructionNumber),
+    Del(ClauseIndex),
 }
 impl<'a> Display for DirectProofInstruction<'a> {
     fn fmt(&self , f: &mut Formatter<'_>) -> FmtResult {
         match self {
             DirectProofInstruction::Rup(id, num, clause, chain) => {
-                write!(f, "r {} ", id)?;
-                if let Some(n) = num.offset() {
-                    write!(f, "l {}", n.get())?;
-                }
+                write!(f, "r {} {} ", id.text(), num.text())?;
                 for lit in clause {
-                    write!(f, "{} ", lit)?;
+                    write!(f, "{} ", lit.text())?;
                 }
                 write!(f, "0 ")?;
                 for cid in chain {
-                    write!(f, "{} ", cid)?;
+                    write!(f, "{} ", cid.text())?;
                 }
                 write!(f, "0\n")?;
             },
             DirectProofInstruction::Wsr(id, num, clause, mchain) => {
-                write!(f, "w {} ", id)?;
-                if let Some(n) = num.offset() {
-                    write!(f, "l {}", n.get())?;
-                }
+                write!(f, "w {} {} ", id.text(), num.text())?;
                 for lit in clause {
-                    write!(f, "{} ", lit)?;
+                    write!(f, "{} ", lit.text())?;
                 }
                 write!(f, "0 ")?;
                 for (var, lit) in mchain.witness() {
-                    write!(f, "{} {} ", var, lit)?;
+                    write!(f, "{} {} ", var.text(), lit.text())?;
                 }
                 write!(f, "0 ")?;
                 for subchain in mchain {
                     match subchain {
                         Subchain::Chain(lid, chain) => {
                             if lid != id {
-                                write!(f, "{} ", lid)?;
+                                write!(f, "{} ", lid.text())?;
                             }
                             for cid in chain {
-                                write!(f, "{} ", cid)?;
+                                write!(f, "{} ", cid.text())?;
                             }
                             write!(f, "0 ")?;
                         },
                         Subchain::Deletion(did, _) => {
-                            write!(f, "{} d", did)?;
+                            write!(f, "{} d ", did.text())?;
                         },
                     }
                 }
                 write!(f, "0\n")?;
             },
-            DirectProofInstruction::Del(id, num) => {
-                write!(f, "d {} ", id)?;
-                if let Some(n) = num.offset() {
-                    write!(f, "l {}", n.get())?;
-                }
+            DirectProofInstruction::Del(id) => {
+                write!(f, "d {}\n", id.text())?;
             },
         }
         Ok(())
@@ -177,7 +165,7 @@ impl<'a> ProofIterator<'a> {
             Some(match unsafe { self.proof.vec.get_unchecked(self.count) } {
                 DirectInstruction::Rup(nid, num, clause, chain) => unsafe { DirectProofInstruction::Rup(*nid, *num, self.clausedb.retrieve(self.database, *clause), self.chaindb.retrieve_chain(self.database, *chain)) },
                 DirectInstruction::Wsr(nid, num, clause, mchain) => unsafe { DirectProofInstruction::Wsr(*nid, *num, self.clausedb.retrieve(self.database, *clause), self.chaindb.retrieve_multichain(self.database, *mchain)) },
-                DirectInstruction::Del(nid, num) => DirectProofInstruction::Del(*nid, *num),
+                DirectInstruction::Del(nid) => DirectProofInstruction::Del(*nid),
             })
         }
     }
@@ -211,8 +199,8 @@ impl<'a> Drop for ProofIterator<'a> {
 }
 
 enum ReverseInstruction {
-    Rup(ClauseIndex, InstructionNumber, ChainAddress),
-    Wsr(ClauseIndex, InstructionNumber, MultichainAddress),
+    Rup(ClauseIndex, ChainAddress),
+    Wsr(ClauseIndex, MultichainAddress),
     Del(ClauseIndex, InstructionNumber, ClauseAddress),
 }
 
@@ -224,16 +212,49 @@ impl ProofReversion {
     pub fn new() -> ProofReversion {
         ProofReversion { vec: Vec::new() }
     }
-    pub fn insert_rup(&mut self, nid: ClauseIndex, num: InstructionNumber, chain: ChainAddress) {
-        self.vec.push(ReverseInstruction::Rup(nid, num, chain))
+    pub fn insert_rup(&mut self, nid: ClauseIndex, chain: ChainAddress) {
+        self.vec.push(ReverseInstruction::Rup(nid, chain))
     }
-    pub fn insert_wsr(&mut self, nid: ClauseIndex, num: InstructionNumber, mchain: MultichainAddress) {
-        self.vec.push(ReverseInstruction::Wsr(nid, num, mchain))
+    pub fn insert_wsr(&mut self, nid: ClauseIndex, mchain: MultichainAddress) {
+        self.vec.push(ReverseInstruction::Wsr(nid, mchain))
     }
     pub fn insert_del(&mut self, nid: ClauseIndex, num: InstructionNumber, clause: ClauseAddress) {
         self.vec.push(ReverseInstruction::Del(nid, num, clause))
     }
     pub fn extract<'a, 'b: 'a, 'c: 'a>(&'b mut self, db: &'c mut Database) -> ProofReversionIterator<'a> {
+        println!("extracting fragment");
+        for ins in &self.vec {
+            match ins {
+                ReverseInstruction::Rup(id, addr) => {
+                    print!("rup [{}]:  ", id);
+                    for cid in unsafe { ChainDatabase.retrieve_chain(db, *addr) } {
+                        print!("{} ", cid);
+                    }
+                    print!("\n");
+                },
+                ReverseInstruction::Wsr(id, addr) => {
+                    print!("wsr [{}]:  \n", id);
+                    let mchain = unsafe { ChainDatabase.retrieve_multichain(db, *addr) };
+                    for subc in mchain {
+                        match subc {
+                            Subchain::Chain(lid, chain) => {
+                                print!("   {}: ", lid);
+                                for cid in chain {
+                                    print!("{} ", cid);
+                                }
+                                print!("\n");
+                            },
+                            Subchain::Deletion(lid, _) => {
+                                print!("  {}: del\n", lid);
+                            },
+                        }
+                    }
+                },
+                ReverseInstruction::Del(id, _, _) => {
+                    print!("del [{}]\n", id);
+                }
+            }
+        }
         let len = self.vec.len();
         ProofReversionIterator::<'a> {
             proof: self,
@@ -246,62 +267,41 @@ impl ProofReversion {
 }
 
 pub enum ReverseProofInstruction<'a> {
-    Rup(ClauseIndex, InstructionNumber, Chain<'a>),
-    Wsr(ClauseIndex, InstructionNumber, Multichain<'a>),
+    Rup(ClauseIndex, Chain<'a>),
+    Wsr(ClauseIndex, Multichain<'a>),
     Del(ClauseIndex, InstructionNumber, Clause<'a>),
 }
 impl<'a> Display for ReverseProofInstruction<'a> {
     fn fmt(&self , f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            ReverseProofInstruction::Rup(id, num, chain) => {
-                write!(f, "r {} ", id)?;
-                if let Some(n) = num.offset() {
-                    write!(f, "l {}", n.get())?;
-                }
+            ReverseProofInstruction::Rup(id, chain) => {
+                write!(f, "r {} ", id.text())?;
                 for cid in chain {
-                    write!(f, "{} ", cid)?;
+                    write!(f, "{} ", cid.text())?;
                 }
             },
-            ReverseProofInstruction::Wsr(id, num, mchain) => {
-                for subchain in mchain {
-                    if let Subchain::Deletion(did, clause) = subchain {
-                        write!(f, "d {} ", did)?;
-                        if let Some(n) = num.offset() {
-                            write!(f, "l {} ", n.get())?;
-                        }
-                        for lit in clause {
-                            write!(f, "{} ", lit)?;
-                        }
-                        write!(f, "0\n")?;
-                    }
-                }
-                write!(f, "w {} ", id)?;
-                if let Some(n) = num.offset() {
-                    write!(f, "l {}", n.get())?;
-                }
+            ReverseProofInstruction::Wsr(id, mchain) => {
+                write!(f, "w {} ", id.text())?;
                 for (var, lit) in mchain.witness() {
-                    write!(f, "{} {} ", var, lit)?;
+                    write!(f, "{} {} ", var.text(), lit.text())?;
                 }
                 write!(f, "0 ")?;
                 for subchain in mchain {
                     if let Subchain::Chain(lid, chain) = subchain {
                         if lid != id {
-                            write!(f, "{} ", lid)?;
+                            write!(f, "{} ", lid.text())?;
                         }
                         for cid in chain {
-                            write!(f, "{} ", cid)?;
+                            write!(f, "{} ", cid.text())?;
                         }
                         write!(f, "0 ")?;
                     }
                 }
             },
             ReverseProofInstruction::Del(id, num, clause) => {
-                write!(f, "d {} ", id)?;
-                if let Some(n) = num.offset() {
-                    write!(f, "l {}", n.get())?;
-                }
+                write!(f, "d {} {} ", id.text(), num.text())?;
                 for lit in clause {
-                    write!(f, "{} ", lit)?;
+                    write!(f, "{} ", lit.text())?;
                 }
             },
         }
@@ -324,8 +324,8 @@ impl<'a> ProofReversionIterator<'a> {
         } else {
             self.count -= 1usize;
             Some(match unsafe { self.proof.vec.get_unchecked(self.count) } {
-                ReverseInstruction::Rup(nid, num, chain) => unsafe { ReverseProofInstruction::Rup(*nid, *num, self.chaindb.retrieve_chain(self.database, *chain)) },
-                ReverseInstruction::Wsr(nid, num, mchain) => unsafe { ReverseProofInstruction::Wsr(*nid, *num, self.chaindb.retrieve_multichain(self.database, *mchain)) },
+                ReverseInstruction::Rup(nid, chain) => unsafe { ReverseProofInstruction::Rup(*nid, self.chaindb.retrieve_chain(self.database, *chain)) },
+                ReverseInstruction::Wsr(nid, mchain) => unsafe { ReverseProofInstruction::Wsr(*nid, self.chaindb.retrieve_multichain(self.database, *mchain)) },
                 ReverseInstruction::Del(nid, num, clause) => unsafe { ReverseProofInstruction::Del(*nid, *num, self.clausedb.retrieve(self.database, *clause)) },                
             })
         }
@@ -340,8 +340,8 @@ impl<'a> Drop for ProofReversionIterator<'a> {
     fn drop(&mut self) {
         for ins in &self.proof.vec {
             match ins {
-                ReverseInstruction::Rup(_, _, chain) => unsafe { self.chaindb.remove_chain(self.database, *chain) },
-                ReverseInstruction::Wsr(_, _, mchain) => unsafe { self.chaindb.remove_multichain_and_clauses(self.database, *mchain) },
+                ReverseInstruction::Rup(_, chain) => unsafe { self.chaindb.remove_chain(self.database, *chain) },
+                ReverseInstruction::Wsr(_, mchain) => unsafe { self.chaindb.remove_multichain(self.database, *mchain) },
                 ReverseInstruction::Del(_, _, clause) => unsafe { self.clausedb.remove(self.database, *clause) },
             }
         }

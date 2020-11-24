@@ -2,6 +2,7 @@ use std::{
     io::{self, Result as IoResult, BufReader, Write, BufWriter, Read, Stdout, Stderr, StderrLock, StdoutLock},
     path::{PathBuf, Path},
     fmt::{self, Display, Result as FmtResult, Formatter, Arguments as FmtArguments},
+    sync::{Mutex},
 };
 
 /// A clonable file position structure. For binary files, this structure represent a byte position. For text files, it represents a line number.
@@ -86,6 +87,18 @@ pub struct FilePosition {
     offset: u64,
 }
 impl FilePosition {
+    pub fn new(path: &Path, binary: bool) -> FilePosition {
+        let mut buf = PathBuf::new();
+        buf.push(path);
+        FilePosition {
+            path: buf,
+            offset: if binary {
+                0b000u64
+            } else {
+                0b101u64
+            },
+        }
+    }
     /// Checks if the file is binary.
     fn binary(&self) -> bool {
         self.offset & 0b01u64 == 0u64
@@ -174,6 +187,28 @@ impl<'a> Write for OutputWriter<'a> {
 	}
 }
 
+pub struct OutputMuting {
+    mute: bool
+}
+impl OutputMuting {
+    fn new() -> OutputMuting {
+        OutputMuting { mute: false }
+    }
+    pub fn mute(&mut self) {
+        self.mute = true;
+    }
+    pub fn unmute(&mut self) {
+        self.mute = false;
+    }
+    pub fn is_muted(&self) -> bool {
+        self.mute
+    }
+}
+
+lazy_static! {
+    pub static ref MutedOutput: Mutex<OutputMuting> = Mutex::new(OutputMuting::new());
+}
+
 pub struct OutputHandle {
     stdout: Stdout,
     stderr: Stderr,
@@ -194,6 +229,20 @@ impl OutputHandle {
         let mut lock = self.stderr.lock();
         lock.write_fmt(args).unwrap_or_else(|err| panic!(format!("{}", err)));
         lock
+    }
+    pub fn maybe_out(&self, args: FmtArguments) -> Option<StdoutLock> {
+        if MutedOutput.lock().unwrap().is_muted() {
+            None
+        } else {
+            Some(self.out(args))
+        }
+    }
+    pub fn maybe_err(&self, args: FmtArguments) -> Option<StderrLock> {
+        if MutedOutput.lock().unwrap().is_muted() {
+            None
+        } else {
+            Some(self.err(args))
+        }
     }
 }
 
@@ -246,99 +295,136 @@ macro_rules! append {
 }
 
 #[macro_export]
-macro_rules! titled_message {
-    ($tag: literal, $title: literal @ $pos: expr, $lock: ident, $tag_style: expr, $title_style: expr, $block: block) => {{
-        let mut $lock = $crate::io::PrintedPanic::new(format_args!("{} {}", $tag_style($tag), $title_style($title)));
-        breakline!($lock);
-        append!($lock, "{} {}", ::colored::Colorize::bold(::colored::Colorize::blue("-->")), format!("{}", &$pos));
-        breakline!($lock);
-        $block
-        std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!(format!("{}", err)));
-        $lock
+macro_rules! headed_message {
+    ($constructor: expr, $tag_style: expr, $tag: literal, $title_style: expr, $title: literal, $pos: expr, $lock: ident, $block: block, $after: expr) => {
+        if let Some(mut $lock) = $constructor(format_args!("{} {}", $tag_style($tag), $title_style($title))) {
+            breakline!($lock);
+            if let Some(pos) = $pos {
+                append!($lock, "{} {}", ::colored::Colorize::bold(::colored::Colorize::blue("-->")), format!("{}", pos));
+                breakline!($lock);
+            }
+            $block
+            std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!(format!("{}", err)));
+            $after($lock)
+        } else {
+            let $lock = ();
+            $after($lock)
+        }
+    };
+    ($constructor: expr, $title_style: expr, $title: literal, $pos: expr, $lock: ident, $block: block, $after: expr) => {
+        if let Some(mut $lock) = $constructor(format_args!("{}", $title_style($title))) {
+            breakline!($lock);
+            if let Some(pos) = $pos {
+                append!($lock, "{} {}", ::colored::Colorize::bold(::colored::Colorize::blue("-->")), format!("{}", pos));
+                breakline!($lock);
+            }
+            $block
+            std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!(format!("{}", err)));
+            $after($lock)
+        } else {
+            let $lock = ();
+            $after($lock)
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! create_message {
+    (panick @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
+        headed_message!(|lock| Some($crate::io::PrintedPanic::new(lock)),
+            |msg| ::colored::Colorize::bold(::colored::Colorize::red(msg)), "Fatal error:",
+            |msg| ::colored::Colorize::bold(msg), $title,
+            $pos, $lock, $block, |lock| panic!(lock))
     }};
-    ($tag: literal, $title: literal, $lock: ident, $tag_style: expr, $title_style: expr, $block: block) => {{
-        let mut $lock = $crate::io::PrintedPanic::new(format_args!("{} {}", $tag_style($tag), $title_style($title)));
-        breakline!($lock);
-        $block
-        std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!(format!("{}", err)));
-        $lock
+    (fatal @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
+        headed_message!(|lock| $crate::io::MainOutput.maybe_err(lock),
+            |msg| ::colored::Colorize::bold(::colored::Colorize::red(msg)), "Fatal error:",
+            |msg| ::colored::Colorize::bold(msg), $title,
+            $pos, $lock, $block, |_| ())
+    }};
+    (error @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
+        headed_message!(|lock| $crate::io::MainOutput.maybe_err(lock),
+            |msg| ::colored::Colorize::bold(::colored::Colorize::red(msg)), "Error:",
+            |msg| ::colored::Colorize::bold(msg), $title,
+            $pos, $lock, $block, |_| ())
+    }};
+    (warning @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
+        headed_message!(|lock| $crate::io::MainOutput.maybe_err(lock),
+            |msg| ::colored::Colorize::bold(::colored::Colorize::yellow(msg)), "Warning:",
+            |msg| ::colored::Colorize::bold(msg), $title,
+            $pos, $lock, $block, |_| ())
+    }};
+    (info @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
+        headed_message!(|lock| $crate::io::MainOutput.maybe_out(lock),
+            |msg| ::colored::Colorize::bold(msg), $title,
+            $pos, $lock, $block, |_| ())
+    }};
+    (success @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
+        headed_message!(|lock| $crate::io::MainOutput.maybe_err(lock),
+            |msg| ::colored::Colorize::bold(::colored::Colorize::green(msg)), "Success:",
+            |msg| ::colored::Colorize::bold(msg), $title,
+            $pos, $lock, $block, |_| ())
     }};
 }
 
 #[macro_export]
 macro_rules! panick {
-    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {{
-        let $lock = fatal!($title @ $pos, $lock, $block);
-        panic!($lock)
-    }};
-    ($title: literal, $lock: ident, $block: block) => {{
-        let $lock = fatal!($title, $lock, $block);
-        panic!($lock)
-    }};
+    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {
+        create_message!(panick @ $title, Some(&$pos), $lock, $block)
+    };
+    ($title: literal, $lock: ident, $block: block) => {
+        create_message!(panick @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+    };
 }
 
 #[macro_export]
 macro_rules! fatal {
-    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {{
-        titled_message!("Fatal error:", $title @ $pos, $lock,
-            |$lock| ::colored::Colorize::bold(::colored::Colorize::red($lock)),
-            |$lock| ::colored::Colorize::bold($lock),
-            $block);
-    }};
-    ($title: literal, $lock: ident, $block: block) => {{
-        titled_message!("Fatal error:", $title, $lock,
-            |$lock| ::colored::Colorize::bold(::colored::Colorize::red($lock)),
-            |$lock| ::colored::Colorize::bold($lock),
-            $block);
-    }};
+    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {
+        create_message!(fatal @ $title, Some(&$pos), $lock, $block)
+    };
+    ($title: literal, $lock: ident, $block: block) => {
+        create_message!(fatal @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+    };
 }
 
 #[macro_export]
 macro_rules! error {
-    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {{
-        titled_message!("Error:", $title @ $pos, $lock,
-            |$lock| ::colored::Colorize::bold(::colored::Colorize::red($lock)),
-            |$lock| ::colored::Colorize::bold($lock),
-            $block);
-    }};
-    ($title: literal, $lock: ident, $block: block) => {{
-        titled_message!("Error:", $title, $lock,
-            |$lock| ::colored::Colorize::bold(::colored::Colorize::red($lock)),
-            |$lock| ::colored::Colorize::bold($lock),
-            $block);
-    }};
+    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {
+        create_message!(error @ $title, Some(&$pos), $lock, $block)
+    };
+    ($title: literal, $lock: ident, $block: block) => {
+        create_message!(error @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+    };
 }
 
 #[macro_export]
 macro_rules! warning {
-    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {{
-        titled_message!("Warning:", $title @ $pos, $lock,
-            |$lock| ::colored::Colorize::bold(::colored::Colorize::yellow($lock)),
-            |$lock| ::colored::Colorize::bold($lock),
-            $block);
-    }};
-    ($title: literal, $lock: ident, $block: block) => {{
-        titled_message!("Warning:", $title, $lock,
-            |$lock| ::colored::Colorize::bold(::colored::Colorize::yellow($lock)),
-            |$lock| ::colored::Colorize::bold($lock),
-            $block);
-    }};
+    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {
+        create_message!(warning @ $title, Some(&$pos), $lock, $block)
+    };
+    ($title: literal, $lock: ident, $block: block) => {
+        create_message!(warning @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+    };
 }
 
 #[macro_export]
-macro_rules! result {
-    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {{
-        titled_message!("Result:", $title @ $pos, $lock,
-            |$lock| ::colored::Colorize::bold(::colored::Colorize::green($lock)),
-            |$lock| ::colored::Colorize::bold($lock),
-            $block);
-    }};
-    ($title: literal, $lock: ident, $block: block) => {{
-        titled_message!("Result:", $title, $lock,
-            |$lock| ::colored::Colorize::bold(::colored::Colorize::green($lock)),
-            |$lock| ::colored::Colorize::bold($lock),
-            $block);
-    }};
+macro_rules! info {
+    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {
+        create_message!(info @ $title, Some(&$pos), $lock, $block)
+    };
+    ($title: literal, $lock: ident, $block: block) => {
+        create_message!(info @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+    };
+}
+
+#[macro_export]
+macro_rules! success {
+    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {
+        create_message!(success @ $title, Some(&$pos), $lock, $block)
+    };
+    ($title: literal, $lock: ident, $block: block) => {
+        create_message!(success @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+    };
 }
 
 #[cfg(test)]

@@ -25,7 +25,6 @@ pub enum AsrParsedInstructionKind {
 pub struct AsrParsedInstruction {
     pub kind: AsrParsedInstructionKind,
     pub id: ClauseIndex,
-    pub num: InstructionNumber,
 }
 
 pub struct TextAsrParser<'a> {
@@ -56,7 +55,7 @@ impl<'a> TextAsrParser<'a> {
     pub fn parse_multichain<'b>(&'b mut self,id: ClauseIndex) -> TextMultichainParser<'a, 'b> {
         TextMultichainParser::<'a, 'b> { parser: Some(self), id: Some(id) }
     }
-    pub fn parse_cnf_header(&mut self) -> (FilePositionRef<'a>, MaybeVariable, usize) {
+    pub fn parse_cnf_header(&mut self) -> (FilePositionRef<'a>, MaybeVariable, u64) {
         let pos = match self.peek() {
             Some(Lexeme::Header([b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8])) => self.position(),
             _ => self.expected_header("Expected 'p cnf' header."),
@@ -97,7 +96,7 @@ impl<'a> TextAsrParser<'a> {
             _ => self.expected_instruction("Expected clause or EOF."),
         }
     }
-    pub fn parse_core(&mut self) -> Option<(ClauseIndex, InstructionNumber, FilePositionRef<'a>)> {
+    pub fn parse_core(&mut self) -> Option<(ClauseIndex, FilePositionRef<'a>)> {
         match self.peek() {
             Some(Lexeme::Letter(b'k')) => {
                 self.consume();
@@ -107,8 +106,7 @@ impl<'a> TextAsrParser<'a> {
                 };
                 let pos = self.position();
                 self.consume();
-                let num = self.read_instruction_number(InstructionNumberKind::Core);
-                Some((id, num, pos))
+                Some((id, pos))
             },
             Some(Lexeme::Header(_)) | None => None,
             _ => self.expected_instruction("Expected core instruction 'k', or section header, or EOF."),
@@ -126,28 +124,27 @@ impl<'a> TextAsrParser<'a> {
         self.consume();
         let id = self.peek_index("Expected clause identifier.").unwrap_or_else(|num| self.out_of_range_index(num));
         self.consume();
-        let num = self.read_instruction_number(InstructionNumberKind::Proof);
         Some((AsrParsedInstruction {
             kind: kind,
             id: id,
-            num: num,
         }, pos))
     }
-    fn read_instruction_number(&mut self, kind: InstructionNumberKind) -> InstructionNumber {
-        match self.peek() {
-            Some(Lexeme::Letter(b'l')) => self.consume(),
-            _ => return InstructionNumber::new(kind),
-        }
-        match self.peek() {
-            Some(Lexeme::Number(num)) => match InstructionNumber::try_from((*num, kind)) {
-                Ok(n) => {
-                    self.consume();
-                    n
-                },
+    pub fn parse_instruction_number(&mut self) -> Option<InstructionNumber> {
+        let kind = match self.peek() {
+            Some(Lexeme::Letter(b'k')) => InstructionNumberKind::Core,
+            Some(Lexeme::Letter(b'i')) => InstructionNumberKind::Proof,
+            _ => None?,
+        };
+        self.consume();
+        let inum = match self.peek() {
+            Some(Lexeme::Number(num)) => match InstructionNumber::try_from((kind, *num)) {
+                Ok(n) => n,
                 Err(n) => self.out_of_range_instruction_number(n),
             },
             _ => self.expected_instruction_number(),
-        }
+        };
+        self.consume();
+        Some(inum)
     }
     fn peek_number_variables(&mut self, expect: &'static str) -> Result<MaybeVariable, i64> {
         match self.peek() {
@@ -155,9 +152,9 @@ impl<'a> TextAsrParser<'a> {
             _ => self.expected_number_variables(expect),
         }
     }
-    fn peek_number_clauses(&mut self, expect: &'static str) -> Result<usize, i64> {
+    fn peek_number_clauses(&mut self, expect: &'static str) -> Result<u64, i64> {
         match self.peek() {
-            Some(Lexeme::Number(num)) => usize::try_from(*num).map_err(|_| *num),
+            Some(Lexeme::Number(num)) => u64::try_from(*num).map_err(|_| *num),
             _ => self.expected_number_clauses(expect),
         }
     }
@@ -172,7 +169,7 @@ impl<'a> TextAsrParser<'a> {
     fn peek_index(&mut self, expect: &'static str) -> Result<ClauseIndex, i64> {
         match self.peek() {
             Some(Lexeme::Number(num)) => ClauseIndex::try_from(*num),
-            _ => self.expected_index(expect),
+            _ => self.expected_id(expect),
         }
     }
     fn peek_variable(&mut self, expect: &'static str) -> Result<(Variable, bool), i64> {
@@ -265,7 +262,7 @@ impl<'a> TextAsrParser<'a> {
     }
     fn invalid_input(&mut self, c: u8) -> ! {
         panick!("invalid input" @ self.position, lock, {
-            append!(lock, "Could not recognize character '{}'.", c);
+            append!(lock, "Could not recognize character '{}'.", c as char);
         })
     }
     fn out_of_range_integer(&mut self) -> ! {
@@ -328,8 +325,13 @@ impl<'a> TextAsrParser<'a> {
             append!(lock, "{}", expect);
         })
     }
-    fn expected_index(&mut self, expect: &'static str) -> ! {
+    fn expected_id(&mut self, expect: &'static str) -> ! {
         panick!("expected clause identifier" @ self.position, lock, {
+            append!(lock, "{}", expect);
+        })
+    }
+    fn expected_index_element(&mut self, expect: &'static str) -> ! {
+        panick!("expected index element" @ self.position, lock, {
             append!(lock, "{}", expect);
         })
     }
@@ -360,7 +362,7 @@ impl<'a> TextAsrParser<'a> {
     }
     fn out_of_range_number_clauses(&mut self, num: i64) -> ! {
         panick!("out-of-range number of clauses" @ self.position, lock, {
-            append!(lock, "Parsed a number of clauses {} outside of the range [{}..{}].", num, 0usize, usize::max_value());
+            append!(lock, "Parsed a number of clauses {} outside of the range [{}..{}].", num, 0usize, u64::max_value());
         })
     }
     pub fn position(&self) -> FilePositionRef<'a> {
@@ -368,6 +370,7 @@ impl<'a> TextAsrParser<'a> {
     }
 }
 
+#[repr(transparent)]
 pub struct TextClauseParser<'a, 'b> {
     parser: Option<&'b mut TextAsrParser<'a>>,
 }
@@ -392,6 +395,7 @@ impl<'a, 'b> Drop for TextClauseParser<'a, 'b> {
     }
 }
 
+#[repr(transparent)]
 pub struct TextWitnessParser<'a, 'b> {
     parser: Option<&'b mut TextAsrParser<'a>>,
 }
@@ -509,7 +513,7 @@ pub mod test {
         let mut parser = TextAsrParser::new(InputReader::new(file, &Path::new(path), false));
         let (_, var, cls) = parser.parse_cnf_header();
         assert!(var == MaybeVariable::try_from(50i64).unwrap());
-        assert!(cls == 80usize);
+        assert!(cls == 80u64);
         assert!(parser.parse_premise().unwrap().offset() == Some(12u64));
         {
             let mut ps = parser.parse_clause();
@@ -534,8 +538,7 @@ pub mod test {
         }
         assert!(parser.parse_premise().is_none());
         assert!(parser.parse_core_header().offset() == Some(15u64));
-        let (id, num, pos) = parser.parse_core().unwrap();
-        assert!(num == InstructionNumber::new(InstructionNumberKind::Core));
+        let (id, pos) = parser.parse_core().unwrap();
         assert!(id == ClauseIndex::try_from(1i64).unwrap());
         assert!(pos.offset() == Some(15u64));
         {
@@ -545,8 +548,7 @@ pub mod test {
             assert!(ps.next() == Some(Literal::Bottom));
             assert!(ps.next() == None);
         }
-        let (id, num, pos) = parser.parse_core().unwrap();
-        assert!(num == InstructionNumber::new(InstructionNumberKind::Core));
+        let (id, pos) = parser.parse_core().unwrap();
         assert!(id == ClauseIndex::try_from(38i64).unwrap());
         assert!(pos.offset() == Some(15u64));
         {
@@ -562,7 +564,6 @@ pub mod test {
         assert!(ins == AsrParsedInstruction {
             kind: AsrParsedInstructionKind::Rup,
             id: ClauseIndex::try_from(23i64).unwrap(),
-            num: InstructionNumber::new(InstructionNumberKind::Proof),
         });
         assert!(pos.offset() == Some(16u64));
         {
@@ -583,7 +584,6 @@ pub mod test {
         assert!(ins == AsrParsedInstruction {
             kind: AsrParsedInstructionKind::Wsr,
             id: ClauseIndex::try_from(4294967295i64).unwrap(),
-            num: InstructionNumber::new(InstructionNumberKind::Proof),
         });
         assert!(pos.offset() == Some(16u64));
         {
@@ -625,21 +625,18 @@ pub mod test {
         assert!(ins == AsrParsedInstruction {
             kind: AsrParsedInstructionKind::Del,
             id: ClauseIndex::try_from(18i64).unwrap(),
-            num: InstructionNumber::new(InstructionNumberKind::Proof),
         });
         assert!(pos.offset() == Some(18u64));
         let (ins, pos) = parser.parse_instruction().unwrap();
         assert!(ins == AsrParsedInstruction {
             kind: AsrParsedInstructionKind::Del,
             id: ClauseIndex::try_from(23i64).unwrap(),
-            num: InstructionNumber::new(InstructionNumberKind::Proof),
         });
         assert!(pos.offset() == Some(18u64));
         let (ins, pos) = parser.parse_instruction().unwrap();
         assert!(ins == AsrParsedInstruction {
             kind: AsrParsedInstructionKind::Del,
             id: ClauseIndex::try_from(19i64).unwrap(),
-            num: InstructionNumber::new(InstructionNumberKind::Proof),
         });
         assert!(pos.offset() == Some(19u64));
         assert!(parser.parse_instruction().is_none());
@@ -674,7 +671,7 @@ pub mod test {
         assert!(parsing_catch_panic("test/text_parser/expected_variable.txt", "expected variable") == Some(true));
         assert!(parsing_catch_panic("test/text_parser/expected_number_variables.txt", "expected number of variables") == Some(true));
         assert!(parsing_catch_panic("test/text_parser/expected_number_clauses.txt", "expected number of clauses") == Some(true));
-        assert!(parsing_catch_panic("test/text_parser/expected_index.txt", "expected clause identifier") == Some(true));
+        assert!(parsing_catch_panic("test/text_parser/expected_id.txt", "expected clause identifier") == Some(true));
         assert!(parsing_catch_panic("test/text_parser/oor_literal1.txt", "out-of-range literal") == Some(true));
         assert!(parsing_catch_panic("test/text_parser/oor_literal2.txt", "out-of-range literal") == Some(true));
         assert!(parsing_catch_panic("test/text_parser/oor_variable1.txt", "out-of-range variable") == Some(true));

@@ -145,30 +145,6 @@ impl ChainDatabase {
         }
         db.remove(addr.addr)
     }
-
-    #[inline(always)]
-    pub unsafe fn remove_multichain_and_clauses(&self, db: &mut Database, addr: MultichainAddress) {
-        let mut it = db.iterator_unsafe(addr.addr);
-        it.next();
-        let witness = {
-            let main = it.next().unwrap() as u8;
-            let sub = NonZeroU32::new_unchecked(it.next().unwrap());
-            DatabaseAddress::new(main, sub)
-        };
-        db.remove(witness);
-        let mut subit = UnsafeMultichainIterator {
-            db: db,
-            it: it,
-        };
-        while let Some(subc) = subit.next() {
-            let raddr = match subc {
-                SubchainAddress::Chain(_, caddr) => caddr.addr,
-                SubchainAddress::Deletion(_, caddr) => *caddr.get(),
-            };
-            db.remove(raddr)
-        }
-        db.remove(addr.addr)
-    }
 }
 
 pub struct ChainWriter<'a> {
@@ -205,7 +181,8 @@ impl<'a> WitnessWriter<'a> {
     }
     #[inline]
     pub fn multichain(self) -> MultichainWriter<'a> {
-        self.buffer.set_witness(ChainAddress { addr: self.wt.close() });
+        let addr = ChainAddress { addr: self.wt.close() };
+        self.buffer.set_witness(addr);
         MultichainWriter::<'a> {
             db: unsafe { &mut *self.db },
             map: self.map,
@@ -253,6 +230,7 @@ impl<'a> MultichainWriter<'a> {
             if del {
                 addrser.0 |= ChainDatabase::MultichainDeletionFlag;
             }
+            wt.write(addrser.0);
             wt.write(addrser.1);
         }
         let mcaddr = MultichainAddress { addr: wt.close() };
@@ -419,3 +397,153 @@ impl UnsafeMultichainIterator {
         })
     }
 }
+
+// #[cfg(test)]
+// pub mod test {
+// 	use rand::{self, Rng};
+// 	use crate::{
+//         database::{Database, DatabaseAddress},
+//         basic::{ClauseIndex, Literal, Variable,
+//             test::{generate_index}
+//         },
+//         mapping::test::{generate_clause},
+//         chain::{MultichainBuffer, ChainDatabase, ChainAddress, MultichainAddress, SubchainAddress},
+//         substitution::test::{generate_substitution},
+//     };
+
+//     #[derive(Debug)]
+//     enum Subc {
+//         Chain(Vec<ClauseIndex>),
+//         Clause(ClauseAddress, Vec<Literal>),
+//     }
+
+//     fn generate_chain<R: Rng>(rng: &mut R, size: usize, limit: Option<u32>) -> Vec<ClauseIndex> {
+//         let mut vec = Vec::new();
+//         let length = rng.gen_range(0usize, size + 1usize);
+//         for _ in 0 .. length {
+//             vec.push(generate_index(rng, limit));
+//         }
+//         vec
+//     }
+
+//     fn generate_subc<R: Rng>(rng: &mut R, db: &mut Database, fm: &mut Formula, size: usize, limit: Option<u32>) -> Vec<(ClauseIndex, Subc)> {
+//         let length = rng.gen_range(0usize, size);
+//         let mut laterals = generate_chain(rng, length, None);
+//         laterals.sort();
+//         laterals.dedup();
+//         let mut vec = Vec::new();
+//         for lat in laterals {
+//             let del: bool = rng.gen();
+//             if del {
+//                 let clause = generate_clause(rng, size, 6000u32);
+//                 let wt = ClauseDatabase.open(db);
+//                 for lit in &clause {
+//                     wt.write(lit);
+//                 }
+//                 let addr = wt.close();
+//                 fm.insert(lat, InstructionNumber::new(InstructionNumberKind::Proof), addr);
+//                 vec.push((lat, Subc::Clause(addr, clause)));
+//             } else {
+//                 vec.push((lat, Subc::Chain(generate_chain(rng, size, None))));
+//             }
+//         }
+//         vec
+//     }
+
+//     #[test]
+//     fn test_chain_database() {
+//         let mut rng = rand::thread_rng();
+//         let mut db = Database::new();
+//         let mut chaindb = ChainDatabase;
+//         let mut formula = Formula::new();
+//         let mut buf = MultichainBuffer::new();
+
+//         let mut chains = Vec::<(ChainAddress, Vec<ClauseIndex>)>::new();
+//         let mut mchains = Vec::<(MultichainAddress, Vec<(Variable, Literal)>, Vec<(ClauseIndex, Subc)>)>::new();
+//         for _ in 0 .. 1000 {
+//             let chain = generate_chain(&mut rng, 100usize, None);
+//             let mut wt = chaindb.open_chain(&mut db, None);
+//             for id in &chain {
+//                 wt.write(*id);
+//             }
+//             let addr = wt.close();
+//             chains.push((addr, chain));
+//         }
+//         for _ in 0 .. 1000 {
+//         // for _ in 0 .. 1 {
+//             assert!(buf.witness.is_none());
+//             assert!(buf.subchains.is_empty());
+//             assert!(buf.deletions.is_empty());
+//             let witness = generate_substitution(&mut rng, 100usize);
+//             // let witness = generate_substitution(&mut rng, 4usize);
+//             let subc = generate_subc(&mut rng, 50usize, None);
+//             // let subc = generate_subc(&mut rng, 4usize, None);
+//             // println!("witness: {:?}", witness);
+//             // println!("subchains: {:?}", subc);
+//             let mut swt = chaindb.open_multichain(&mut db, None, &mut buf);
+//             for (var, lit) in &witness {
+//                 swt.write(*var, *lit);
+//             }
+//             let mut mcwt = swt.multichain();
+//             for (id, sc) in &subc {
+//                 match sc {
+//                     Subc::Chain(chain) => {
+//                         let mut cwt = mcwt.proper_chain(*id);
+//                         for cid in chain {
+//                             cwt.write(*cid);
+//                         }
+//                         cwt.close();
+//                         {
+//                             let addr = *unsafe { match mcwt.buffer.subchains.last().unwrap() {
+//                                 SubchainAddress::Chain(_, a) => a.get(),
+//                                 SubchainAddress::Deletion(_, a) => a.get(),
+//                             } };
+//                             let mut rec = unsafe { (&*mcwt.db).retrieve(addr).into_iter() };
+//                             // print!("Written chain record @ {:?}: ", addr);
+//                             // for num in rec {
+//                             //     print!("{} ", num);
+//                             // }
+//                             // print!(";\n");
+//                         }
+//                     },
+//                     Subc::Clause(addr, clause) => {
+//                         mcwt.
+//                     },
+//                 }
+//             }
+//             let (addr, _) = mcwt.close();
+//             // print!("Written multichain record @ {:?}: ", addr.addr);
+//             // let mut rec = unsafe { db.retrieve(addr.addr) };
+//             // for num in rec {
+//             //     print!("{} ", num);
+//             // }
+//             // print!(";\n");
+//             mchains.push((addr, witness, subc));
+//         }
+//         for (addr, chain) in &chains {
+//             let mut ch1 = unsafe { chaindb.retrieve_chain(&db, *addr).into_iter() };
+//             let mut ch2 = chain.iter();
+//             loop { match (ch1.next(), ch2.next()) {
+//                 (Some(x), Some(y)) => assert!(x == y),
+//                 (None, None) => break,
+//                 _ => assert!(false),
+//             } }
+//         }
+//         for (addr, witness, mchain)  in &mchains {
+//             let mut wt1 = unsafe { chaindb.retrieve_multichain(&db, *addr).witness().into_iter() };
+//             let mut wt2 = witness.iter();
+//             loop { match (wt1.next(), wt2.next()) {
+//                 (Some((var1, lit1)), Some((var2, lit2))) => assert!(var1 == var2 && lit1 == lit2),
+//                 (None, None) => break,
+//                 _ => assert!(false),
+//             } }
+//             let mut mc1 = unsafe { chaindb.retrieve_multichain(&db, *addr).into_iter() };
+//             let mut mc2 = mchain.iter();
+//             loop { match (mc1.next(), mc2.next()) {
+//                 (Some(s1), Some(s2)) => (),
+//                 (None, None) => break,
+//                 _ => assert!(false),
+//             } }
+//         }
+//     }
+// }

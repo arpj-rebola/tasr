@@ -88,7 +88,6 @@ impl Trimmer {
                     self.mchain.push_chain(lid, chain_addr);
                 }
             }
-
             self.process_implicit_deletions();
             let mchain_addr = self.db.allocate_multichain(self.mchain.get());
             self.mchain.clear();

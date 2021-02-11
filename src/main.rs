@@ -171,15 +171,12 @@ pub struct PreprocessingConfig {
 }
 impl PreprocessingConfig {
     pub fn run(self) -> PreprocessingResult {
-        println!("checking integrity");
         let (integrity, opt_data) = self.check_integrity();
-        println!("integrity result: {} errors", integrity.errors.len());
         let (preprocessing, result) = if let Some(data) = opt_data {
             (Some(self.preprocess(data)), true)
         } else {
             (None, false)
         };
-        println!("final result: {}", result);
         let out = match self.output {
             Some(x) => x,
             None => self.asr.clone(),

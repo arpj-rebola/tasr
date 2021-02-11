@@ -1,80 +1,51 @@
+use std::{
+    collections::{BTreeSet},
+};
+
 use crate::{
-    basic::{ClauseIndex, MaybeClauseIndex, InstructionNumber},
-    clause::{ClauseAddress},
+    basic::{ClauseIndex},
+    checkerdb::{ClauseAddress},
 };
 
 pub struct Formula {
-    vec: Vec<Option<(InstructionNumber, ClauseAddress)>>,
-    count: usize,
+    vec: Vec<Option<ClauseAddress>>,
+    ids: BTreeSet<ClauseIndex>,
 }
 impl Formula {
     pub fn new() -> Formula {
         Formula {
             vec: Vec::new(),
-            count: 0usize,
+            ids: BTreeSet::new(),
         }
     }
-    pub fn insert(&mut self, nid: ClauseIndex, num: InstructionNumber, addr: ClauseAddress) -> Option<()> {
-        let index = nid.index();
+    pub fn insert(&mut self, id: ClauseIndex, addr: ClauseAddress) -> Option<()> {
+        let index = id.index();
         if index >= self.vec.len() {
-            self.vec.resize((index << 1usize) + 1usize, None);
+            self.vec.resize((index + 1usize) << 1, None);
         }
         let slot = unsafe { self.vec.get_unchecked_mut(index) };
-        if slot.is_none() {
-            *slot = Some((num, addr));
-            self.count += 1usize;
+        if let None = slot {
+            *slot = Some(addr);
+            self.ids.insert(id);
             Some(())
         } else {
             None
         }
     }
-    pub fn remove(&mut self, nid: ClauseIndex) -> Option<(InstructionNumber, ClauseAddress)> {
-        let slot = self.vec.get_mut(nid.index())?;
+    pub fn take(&mut self, id: ClauseIndex) -> Option<ClauseAddress> {
+        let index = id.index();
+        let slot = self.vec.get_mut(index)?;
         if slot.is_none() {
             None
         } else {
-            let pair = slot.take();
-            self.count -= 1usize;
-            pair
+            self.ids.remove(&id);
+            slot.take()
         }
     }
-    pub fn get(&self, nid: ClauseIndex) -> Option<&(InstructionNumber, ClauseAddress)> {
-        self.vec.get(nid.index())?.as_ref()
+    pub fn get(&self, id: ClauseIndex) -> Option<ClauseAddress> {
+        *self.vec.get(id.index())?
     }
-    pub fn size(&mut self) -> usize {
-        self.count
-    }
-}
-impl<'a> IntoIterator for &'a Formula {
-    type Item = (ClauseIndex, InstructionNumber, ClauseAddress);
-    type IntoIter = FormulaIterator<'a>;
-    fn into_iter(self) -> FormulaIterator<'a> {
-        let count = self.count;
-        FormulaIterator::<'a> {
-            formula: self,
-            nid: MaybeClauseIndex::new(None),
-            count: count,
-        }
-    }
-}
-
-pub struct FormulaIterator<'a> {
-    formula: &'a Formula,
-    nid: MaybeClauseIndex,
-    count: usize,
-}
-impl<'a> Iterator for FormulaIterator<'a> {
-    type Item = (ClauseIndex, InstructionNumber, ClauseAddress);
-    fn next(&mut self) -> Option<(ClauseIndex, InstructionNumber, ClauseAddress)> {
-        if self.count == 0usize {
-            None
-        } else { loop {
-            self.nid = unsafe { self.nid.succ() };
-            let id = self.nid.get().unwrap();
-            if let Some(&(num, addr)) = unsafe { self.formula.vec.get_unchecked(id.index()).as_ref() } {
-                self.count -= 1usize;
-                break Some((id, num, addr))
-            }
-        } }
+    pub fn clauses<'a>(&'a self) -> impl 'a + Iterator<Item = ClauseIndex> {
+        self.ids.iter().copied()
     }
 }

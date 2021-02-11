@@ -74,13 +74,13 @@ impl Substitution {
     pub fn clear(&mut self) {
         self.vec.clear()
     }
-    pub fn get(&mut self, var: Variable) -> Option<Literal> {
+    pub fn get(&self, var: Variable) -> Option<Literal> {
         if self.vec.is_empty() {
             None
         } else {
             let mut current = 0u32;
             loop {
-                let node = unsafe { self.vec.get_unchecked_mut(current as usize) };
+                let node = unsafe { self.vec.get_unchecked(current as usize) };
                 current = match var.cmp(&node.var) {
                     Ordering::Less => node.left,
                     Ordering::Greater => node.right,
@@ -92,7 +92,7 @@ impl Substitution {
             }
         }
     }
-    pub fn map(&mut self, lit: Literal) -> Literal {
+    pub fn map(&self, lit: Literal) -> Literal {
         match lit.variable().get() {
             Some(var) => match self.get(var) {
                 Some(l) => if lit.positive() {

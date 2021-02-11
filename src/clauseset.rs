@@ -4,19 +4,18 @@ use std::{
 
 use crate::{
     basic::{Literal},
-    clause::{ClauseDatabase, ClauseAddress},
-    database::{Database},
-    mapping::{LiteralSet}
+    model::{Model},
+    checkerdb::{CheckerDb, Clause, ClauseAddress},
 };
 
-struct MainHash {
+pub struct MainHasher {
     sum: usize,
     prod: usize,
     xor: usize,
 }
-impl MainHash {
-    fn new() -> MainHash {
-        MainHash {
+impl MainHasher {
+    fn new() -> MainHasher {
+        MainHasher {
             sum: 0usize,
             prod: 1usize,
             xor: 0usize,
@@ -28,16 +27,22 @@ impl MainHash {
         self.xor ^= x as usize;
     }
     fn get(self) -> usize {
-        1023usize.wrapping_mul(self.sum).wrapping_add(self.prod ^ self.xor) & ClauseSet::Width
+        1023usize.wrapping_mul(self.sum).wrapping_add(self.prod ^ self.xor)
+    }
+    fn hash_clause(mut self, clause: Clause) -> usize {
+        for &lit in clause {
+            unsafe { self.hash(mem::transmute::<Literal, u32>(lit)); } 
+        }
+        self.get()
     }
 }
 
-struct SubHash {
+struct SubHasher {
     val: u32,
 }
-impl SubHash {
-    fn new() -> SubHash {
-        SubHash { val: 0u32 }
+impl SubHasher {
+    fn new() -> SubHasher {
+        SubHasher { val: 0u32 }
     }
     fn hash(&mut self, x: u32) {
         self.val ^= x;
@@ -48,12 +53,17 @@ impl SubHash {
     fn get(self) -> u32 {
         self.val
     }
+    fn hash_clause(mut self, clause: Clause) -> u32 {
+        for &lit in clause {
+            unsafe { self.hash(mem::transmute::<Literal, u32>(lit)); }
+        }
+        self.get()
+    }
 }
 
 pub struct ClauseSet {
     table: Vec<Vec<(ClauseAddress, u32)>>,
-    clausedb: ClauseDatabase,
-    lits: LiteralSet,
+    model: Model,
 }
 impl ClauseSet {
     const Width: usize = (1usize << 16) - 1usize;
@@ -62,56 +72,47 @@ impl ClauseSet {
         table.resize_with(ClauseSet::Width, || Vec::with_capacity(4usize));
         ClauseSet {
             table: table,
-            clausedb: ClauseDatabase,
-            lits: LiteralSet::new(),
+            model: Model::new(),
         }
     }
-    pub fn insert(&mut self, database: &Database, addr: ClauseAddress) {
-        let clause = unsafe { self.clausedb.retrieve(database, addr) };
-        let mut main = MainHash::new();
-        let mut sub = SubHash::new();
-        for lit in clause {
-            main.hash(*unsafe { mem::transmute::<&Literal, &u32>(lit) });
-            sub.hash(*unsafe { mem::transmute::<&Literal, &u32>(lit) });
-        }
-        let row = unsafe { self.table.get_unchecked_mut(main.get()) };
-        row.push((addr, sub.get()));
+    pub fn insert(&mut self, db: &CheckerDb, addr: ClauseAddress) {
+        let clause = db.retrieve_clause(addr);
+        let main = MainHasher::new().hash_clause(clause) & ClauseSet::Width;
+        let sub = SubHasher::new().hash_clause(clause);
+        let row = unsafe { self.table.get_unchecked_mut(main) };
+        row.push((addr, sub));
     }
-    pub fn remove(&mut self, database: &Database, clause: &[Literal]) -> Option<ClauseAddress> {
-        let mut main = MainHash::new();
-        let mut sub = SubHash::new();
-        let length = clause.len();
+    pub fn take(&mut self, db: &CheckerDb, clause: Clause) -> Option<ClauseAddress> {
+        let main = MainHasher::new().hash_clause(clause) & ClauseSet::Width;
+        let sub = SubHasher::new().hash_clause(clause);
+        let length = clause.length();
         for &lit in clause {
-            main.hash(unsafe { mem::transmute::<Literal, u32>(lit) });
-            sub.hash(unsafe { mem::transmute::<Literal, u32>(lit) });
-            self.lits.set(lit);
+            self.model.set(lit);
         }
-        let subhash = sub.get();
-        let row = unsafe { self.table.get_unchecked_mut(main.get()) };
+        let row = unsafe { self.table.get_unchecked_mut(main) };
         let mut iter = row.iter().enumerate();
-        let lits_rf = &mut self.lits;
-        let opti = loop {
-            match iter.next() {
-                Some((n, &(target_addr, target_sub))) => if target_sub == subhash {
-                    let target_clause = unsafe { self.clausedb.retrieve(database, target_addr) };
-                    if target_clause.length() == length {
-                        if target_clause.into_iter().all(|&lit| lits_rf.check(lit)) {
-                            break Some(n)
-                        }
+        let model = &mut self.model;
+        let opt_i = loop { match iter.next() {
+            Some((n, &(target_addr, target_sub))) => if target_sub == sub {
+                let target_clause = db.retrieve_clause(target_addr);
+                if target_clause.length() == length {
+                    if target_clause.into_iter().all(|&lit| model.member(lit).is_true()) {
+                        break Some(n)
                     }
-                },
-                None => break None,
-            }
-        };
+                }
+            },
+            None => break None,
+        } };
         for &lit in clause {
-            self.lits.clear(lit);
+            self.model.clear(lit);
         }
-        Some(row.swap_remove(opti?).0)
+        let (addr, _) = row.swap_remove(opt_i?);
+        Some(addr)
     }
-    pub fn delete_all(&mut self, database: &mut Database) {
+    pub fn deallocate_clauses(&mut self, db: &mut CheckerDb) {
         for row in &self.table {
-            for &(addr, _) in row {
-                unsafe { ClauseDatabase.remove(database, addr); }
+            for (addr, _) in row {
+                db.deallocate_clause(*addr)
             }
         }
     }

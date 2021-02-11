@@ -1,236 +1,320 @@
 use std::{
-    time::{Instant},
-    num::{NonZeroU64},
+    path::{Path},
+    io::{Write},
+    time::{Instant, Duration},
 };
 
 use crate::{
-    database::{Database},
-    clause::{ClauseDatabase, ClauseAddress},
-    chain::{ChainDatabase, MultichainBuffer},
-    formula::{Formula},
-    mapping::{IndexMapping},
-    proof::{ProofReversion, ProofReversionIterator},
-    textparser::{TextAsrParser, AsrParsedInstructionKind, TextClauseParser},
-    basic::{ClauseIndex, InstructionNumber, InstructionNumberKind},
+    checkerdb::{CheckerDb, ClauseAddress, ChainAddress, WitnessAddress, MultichainAddress},
+    io::{FilePosition, InputReader},
+    idmap::{IndexMapping},
+    buffer::{UncheckedClauseBuffer, UncheckedChainBuffer, UncheckedWitnessBuffer, UncheckedMultichainBuffer},
+    basic::{InstructionNumber, ClauseIndex},
+    textparser::{TextAsrParser, TextClauseParser, TextChainParser, TextMultichainParser, TextWitnessParser, PrepParsedInstructionKind, PrepParsedInstruction},
+    proof::{BackwardsProof},
 };
 
-pub struct SplittingData {
-    pub database: Database,
-    pub formula: Formula,
-    pub stats: PreprocessingStats,
-    pub qed: ClauseIndex,
+pub struct SplitterConfig {
+    pub chunk_size: u64,
+    pub end: InstructionNumber,
 }
 
 pub struct PreprocessingStats {
     pub num_chunks: u64,
     pub num_cores: u64,
+    pub num_instructions: u64,
     pub num_intros: u64,
     pub num_dels: u64,
-    pub num_instructions: u64,
-    pub chunk_size: Option<NonZeroU64>,
-    pub start_time: Instant,
-    pub splitting_time: Instant,
-    pub trimming_time: Instant,
+    start_time: Instant,
+    pub split_time: Option<Duration>,
+    pub trim_time: Option<Duration>,
 }
 impl PreprocessingStats {
-    pub fn new(chunk_size: Option<NonZeroU64>) -> PreprocessingStats {
-        let now = Instant::now();
+    fn new() -> PreprocessingStats {
         PreprocessingStats {
             num_chunks: 0u64,
             num_cores: 0u64,
+            num_instructions: 0u64,
             num_intros: 0u64,
             num_dels: 0u64,
-            num_instructions: 0u64,
-            chunk_size: chunk_size,
-            start_time: now,
-            splitting_time: now,
-            trimming_time: now,
+            start_time: Instant::now(),
+            split_time: None,
+            trim_time: None,
         }
     }
-    pub fn record_splitting_time(&mut self) {
-        let now = Instant::now();
-        self.splitting_time = now;
-        self.trimming_time = now;
+    pub fn record_split_time(&mut self) {
+        self.split_time = Some(Instant::now().duration_since(self.start_time));
+        self.start_time = Instant::now();
     }
-    pub fn record_trimming_time(&mut self) {
-        let now = Instant::now();
-        self.trimming_time = now;
+    pub fn record_trim_time(&mut self) {
+        self.trim_time = Some(Instant::now().duration_since(self.start_time));
+        self.start_time = Instant::now();
+    }
+    pub fn new_core(&mut self) {
+        self.num_cores += 1u64;
+        self.num_intros += 1u64;
+    }
+    pub fn new_inference(&mut self) {
+        self.num_instructions += 1u64;
+        self.num_intros += 1u64;
+    }
+    pub fn new_implicit_deletion(&mut self) {
+        self.num_dels += 1u64;
+    }
+    pub fn new_deletion_instruction(&mut self) {
+        self.num_dels += 1u64;
+        self.num_instructions += 1u64;
+    }
+    pub fn new_chunk(&mut self) {
+        self.num_chunks += 1u64;
+    }
+    pub fn instruction_count(&self) -> u64 {
+        self.num_instructions + self.num_cores
     }
 }
 
-pub struct Splitter {
-    database: Database,
-    clausedb: ClauseDatabase,
-    chaindb: ChainDatabase,
-    formula: Formula,
-    mapping: IndexMapping,
-    proof: ProofReversion,
-    buffer: MultichainBuffer,
-    stats: PreprocessingStats,
-    limit: InstructionNumber,
-    count: InstructionNumber,
-    qedid: Option<ClauseIndex>,
+pub struct SplitterData {
+    pub db: CheckerDb,
+    pub result: Vec<(ClauseIndex, ClauseAddress, FilePosition)>,
+    pub qed: ClauseIndex,
+    pub stats: PreprocessingStats,
 }
-impl Splitter {
-    pub fn new(qed: InstructionNumber, chunksize: Option<NonZeroU64>, ps: &mut TextAsrParser<'_>) -> Option<Splitter> {
-        let mut spl = Splitter {
-            database: Database::new(),
-            clausedb: ClauseDatabase,
-            chaindb: ChainDatabase,
-            formula: Formula::new(),
-            mapping: IndexMapping::new(),
-            proof: ProofReversion::new(),
-            buffer: MultichainBuffer::new(),
-            stats: PreprocessingStats::new(chunksize),
-            limit: qed,
-            count: InstructionNumber::new(InstructionNumberKind::Core),
-            qedid: None,
-        };
-        spl.process_core(ps);
-        Some(spl)
-    }
-    pub fn split<'a, 'b: 'a, 'c: 'a, 'p>(&'b mut self, ps: &'c mut TextAsrParser<'p>) -> SplitterIterator<'a, 'p> {
-        SplitterIterator::<'a, 'p> {
-            split: self,
-            parser: ps,
+
+struct SplitterBase {
+    db: CheckerDb,
+    idmap: IndexMapping,
+    clause: UncheckedClauseBuffer,
+    chain: UncheckedChainBuffer,
+    witness: UncheckedWitnessBuffer,
+    mchain: UncheckedMultichainBuffer,
+    dels: Vec<ClauseIndex>,
+    proof: BackwardsProof,
+    current: InstructionNumber,
+    counter: u64,
+    qed: Option<ClauseIndex>,
+    config: SplitterConfig,
+    stats: PreprocessingStats,
+}
+impl SplitterBase {
+    fn new(config: SplitterConfig) -> SplitterBase {
+        SplitterBase {
+            db: CheckerDb::new(),
+            idmap: IndexMapping::new(),
+            clause: UncheckedClauseBuffer::new(),
+            chain: UncheckedChainBuffer::new(),
+            witness: UncheckedWitnessBuffer::new(),
+            mchain: UncheckedMultichainBuffer::new(),
+            dels: Vec::new(),
+            proof: BackwardsProof::new(),
+            current: InstructionNumber::new_premise(),
+            counter: config.chunk_size,
+            qed: None,
+            config: config,
+            stats: PreprocessingStats::new(),
         }
     }
-    pub fn extract(mut self) -> Option<SplittingData> {
-        self.stats.record_splitting_time();
-        Some(SplittingData {
-            database: self.database,
-            formula: self.formula,
-            stats: self.stats,
-            qed: self.qedid?,
-        })
-    }
-    fn process_core(&mut self, ps: &mut TextAsrParser<'_>) {
-        ps.parse_core_header();
-        while let Some((oid, _)) = ps.parse_core() {
-            self.count = self.count.succ().unwrap();
-            let num = ps.parse_instruction_number().unwrap_or_else(|| self.count);
-            let nid = self.mapping.allocate(oid).unwrap();
-            let addr = self.process_clause(ps.parse_clause());
-            self.formula.insert(nid, num, addr);
-            if self.count >= self.limit {
-                self.qedid = Some(nid);
+    fn process_core(&mut self, asr: &mut TextAsrParser<'_>, buffer: &mut Vec<u8>) {
+        asr.parse_core_header();
+        self.current = InstructionNumber::new_premise();
+        while let Some(ins) = asr.parse_instruction(true, true) {
+            match ins.kind() {
+                PrepParsedInstructionKind::Core => self.process_core_instruction(asr, &ins),
+                _ => self.save_instruction(asr, &ins, buffer),
+            }
+            self.current.next();
+            if self.finished() {
+                self.qed = Some(self.idmap.id(*ins.index()).unwrap());
                 break;
             }
         }
-        ps.parse_proof_header();
-        self.count = InstructionNumber::new(InstructionNumberKind::Proof)
     }
-    fn process_proof_fragment(&mut self, ps: &mut TextAsrParser<'_>) -> Option<()> {
-        if self.count >= self.limit {
-            None
-        } else {
-            self.stats.num_chunks += 1u64;
-            loop {
-                self.count = self.count.succ().unwrap();
-                let (ins, _) = ps.parse_instruction().unwrap();
-                let nid = match ins.kind {
-                    AsrParsedInstructionKind::Rup => self.process_rup(ps, ins.id),
-                    AsrParsedInstructionKind::Wsr => self.process_wsr(ps, ins.id),
-                    AsrParsedInstructionKind::Del => self.process_del(ins.id),
-                };
-                if self.count >= self.limit {
-                    self.qedid = Some(nid);
-                }
-                if self.count >= self.limit || self.stats.chunk_size.map_or(true, |s| self.count.is_break(s)) {
-                    break Some(())
-                }
+    fn process_proof_chunk(&mut self, asr: &mut TextAsrParser) -> Option<()> {
+        while let Some(ins) = asr.parse_instruction(false, true) {
+            match ins.kind() {
+                PrepParsedInstructionKind::Rup => self.process_rup_instruction(asr, &ins),
+                PrepParsedInstructionKind::Del => self.process_del_instruction(asr, &ins),
+                PrepParsedInstructionKind::Wsr => self.process_wsr_instruction(asr, &ins),
+                _ => (),
+            }
+            self.next_counter();
+            if self.finished() {
+                self.qed = Some(self.idmap.id(*ins.index()).unwrap());
+                return Some(())
+            }
+            if self.chunk_done() {
+                return Some(())
             }
         }
+        None
     }
-    fn process_rup(&mut self, ps: &mut TextAsrParser<'_>, oid: ClauseIndex) -> ClauseIndex {
-        let num = ps.parse_instruction_number().unwrap_or_else(|| self.count);
-        let nid = self.mapping.allocate(oid).unwrap();
-        let clause = self.process_clause(ps.parse_clause());
-        self.formula.insert(nid, num, clause);
-        let mut ps_chain = ps.parse_chain();
-        let mut wt = self.chaindb.open_chain(&mut self.database, Some(&self.mapping));
-        while let Some(id) = ps_chain.next() {
-            wt.write(id);
-        }
-        let chain = wt.close();
-        self.proof.insert_rup(nid, chain);
-        nid
+    fn process_core_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+        let oid = *ins.index();
+        let clause_addr = self.process_clause(asr.parse_clause());
+        self.idmap.map(oid, clause_addr, ins.default_position()).unwrap();
     }
-    fn process_wsr(&mut self, ps: &mut TextAsrParser<'_>, oid: ClauseIndex) -> ClauseIndex {
-        let num = ps.parse_instruction_number().unwrap_or_else(|| self.count);
-        let nid = self.mapping.allocate(oid).unwrap();
-        let clause = self.process_clause(ps.parse_clause());
-        self.formula.insert(nid, num, clause);
-        let ptr: *mut IndexMapping = &mut self.mapping;
-        let mut witness_wt = self.chaindb.open_multichain(&mut self.database, Some(&mut self.mapping), &mut self.buffer);
-        {
-            let mut witness_ps = ps.parse_witness();
-            while let Some((var, lit)) = witness_ps.next() {
-                witness_wt.write(var, lit);
-            }
-        }
-        let mut multichain_wt = witness_wt.multichain();
-        {
-            let mut multichain_ps = ps.parse_multichain(oid);
-            while let Some((id, subchain_ps)) = multichain_ps.next() {
-                if let Some(mut chain_ps) = subchain_ps {
-                    let mut chain_wt = multichain_wt.proper_chain(id);
-                    while let Some(cid) = chain_ps.next() {
-                        chain_wt.write(cid);
-                    }
-                    chain_wt.close();
-                } else {
-                    multichain_wt.deleted_chain(id, &self.formula);
-                }
-            }
-        }
-        let (mchain, buf) = multichain_wt.close();
-        self.proof.insert_wsr(nid, mchain);
-        let map = unsafe { &mut *ptr };
-        for &oid in buf.deletions() {
-            let nid = map.take(oid).unwrap();
-            let (dnum, daddr) = self.formula.remove(nid).unwrap();
-            self.proof.insert_del(nid, dnum, daddr)
-        }
-        nid
+    fn process_rup_instruction(&mut self, asr: &mut TextAsrParser, ins: &PrepParsedInstruction) {
+        let oid = *ins.index();
+        let clause_addr = self.process_clause(asr.parse_clause());
+        let pos = ins.default_position();
+        let nid = self.idmap.map(oid, clause_addr, pos).unwrap();
+        let chain_addr = self.process_chain(asr.parse_chain());
+        self.proof.insert_rup(nid, pos, chain_addr);
     }
-    fn process_del(&mut self, oid: ClauseIndex) -> ClauseIndex {
-        let nid = self.mapping.take(oid).unwrap();
-        let (num, clause) = self.formula.remove(nid).unwrap();
-        self.proof.insert_del(nid, num, clause);
-        nid
+    fn process_wsr_instruction(&mut self, asr: &mut TextAsrParser, ins: &PrepParsedInstruction) {
+        let oid = *ins.index();
+        let clause_addr = self.process_clause(asr.parse_clause());
+        let pos = ins.default_position();
+        let nid = self.idmap.map(oid, clause_addr, pos).unwrap();
+        let witness_addr = self.process_witness(asr.parse_witness());
+        let mchain_addr = self.process_multichain(asr.parse_multichain(oid), witness_addr);
+        self.proof.insert_wsr(nid, pos, mchain_addr);
+        for &del_oid in &self.dels {
+            let (del_nid, del_addr, del_pos) = self.idmap.unmap(del_oid).unwrap();
+            self.proof.insert_del(del_nid, del_pos, del_addr);
+        }
+        self.dels.clear();
+    }
+    fn process_del_instruction(&mut self, _: &mut TextAsrParser, ins: &PrepParsedInstruction) {
+        let oid = *ins.index();
+        let (nid, addr, pos) = self.idmap.unmap(oid).unwrap();
+        self.proof.insert_del(nid, pos, addr);
     }
     fn process_clause(&mut self, mut ps: TextClauseParser<'_, '_>) -> ClauseAddress {
-        let mut wt = self.clausedb.open(&mut self.database);
         while let Some(lit) = ps.next() {
-            wt.write(lit);
+            self.clause.push(lit);
         }
-        wt.close()
+        let addr = self.db.allocate_clause(self.clause.get());
+        self.clause.clear();
+        addr
+    }
+    fn process_chain(&mut self, mut ps: TextChainParser<'_, '_>) -> ChainAddress {
+        while let Some(oid) = ps.next() {
+            let nid = self.idmap.id(oid).unwrap();
+            self.chain.push(nid);
+        }
+        let addr = self.db.allocate_chain(self.chain.get());
+        self.chain.clear();
+        addr
+    }
+    fn process_witness(&mut self, mut ps: TextWitnessParser<'_, '_>) -> WitnessAddress {
+        while let Some((var, lit)) = ps.next() {
+            self.witness.push(var, lit);
+        }
+        let addr = self.db.allocate_witness(self.witness.get());
+        self.witness.clear();
+        addr
+    }
+    fn process_multichain(&mut self, mut ps: TextMultichainParser<'_, '_>, witness: WitnessAddress) -> MultichainAddress {
+        self.mchain.set_witness(witness);
+        while let Some((olat, spec)) = ps.next() {
+            if let Some(chain_ps) = spec {
+                let nlat = self.idmap.id(olat).unwrap();
+                let addr = self.process_chain(chain_ps);
+                self.mchain.push_chain(nlat, addr);
+            } else {
+                self.dels.push(olat);
+            }
+        }
+        let addr = self.db.allocate_multichain(self.mchain.get());
+        self.mchain.clear();
+        addr
+    }
+    fn save_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction, buffer: &mut Vec<u8>) {
+        let res = match ins.kind() {
+            PrepParsedInstructionKind::Core => asr.save_core_instruction(*ins.index(), ins.default_position(), buffer),
+            PrepParsedInstructionKind::Rup => asr.save_rup_instruction(*ins.index(), ins.default_position(), buffer),
+            PrepParsedInstructionKind::Del => asr.save_del_instruction(*ins.index(), ins.default_position(), buffer),
+            PrepParsedInstructionKind::Wsr => asr.save_wsr_instruction(*ins.index(), ins.default_position(), buffer),
+        };
+        if let Err(e) = res {
+            panic!(format!("{}", e))
+        }
+    }
+    fn init_buffer(&mut self) {
+        self.current = InstructionNumber::new_buffer();
+    }
+    fn init_proof(&mut self) {
+        self.current = InstructionNumber::new_proof();
+    }
+    fn next_counter(&mut self) {
+        self.current.next();
+        self.counter -= 1u64;
+    }
+    fn finished(&self) -> bool {
+        self.current >= self.config.end
+    }
+    fn chunk_reset(&mut self) {
+        self.counter = self.config.chunk_size;
+    }
+    fn chunk_done(&mut self) -> bool {
+        self.counter == 0u64
     }
 }
 
-pub struct SplitterIterator<'a, 'p> {
-    split: &'a mut Splitter,
-    parser: &'a mut TextAsrParser<'p>,
+pub struct Splitter<'a, 'b> {
+    base: SplitterBase,
+    asr: TextAsrParser<'a>,
+    buffer: Option<TextAsrParser<'b>>,
 }
-impl<'a, 'p> SplitterIterator<'a, 'p> {
-    pub fn next(&mut self) -> Option<ProofReversionIterator<'_>> {
-        self.split.process_proof_fragment(self.parser)?;
-        Some(self.split.proof.extract(&mut self.split.database))
+impl<'a, 'b> Splitter<'a, 'b> {
+    pub fn new(config: SplitterConfig, mut asr: TextAsrParser<'a>, buffer: &'b mut Vec<u8>) -> Splitter<'a, 'b> {
+        let mut base = SplitterBase::new(config);
+        base.process_core(&mut asr, buffer);
+        base.init_buffer();
+        let buffer_ps = TextAsrParser::new(InputReader::new(&buffer[..], &Path::new("(buffer)"), false));
+        Splitter::<'_, '_> {
+            base: base,
+            asr: asr,
+            buffer: Some(buffer_ps),
+        }
+    }
+    pub fn next<'c>(&'c mut self) -> Option<SplitFragment<'c>> {
+        if self.base.finished() {
+            None
+        } else {
+            self.base.chunk_reset();
+            self.base.stats.new_chunk();
+            let bf_drop = if let Some(bf) = &mut self.buffer {
+                self.base.process_proof_chunk(bf).is_none()
+            } else {
+                false
+            };
+            if bf_drop {
+                self.buffer = None;
+                self.asr.parse_proof_header();
+                self.base.init_proof();
+            }
+            if !self.base.finished() && !self.base.chunk_done() {
+                self.base.process_proof_chunk(&mut self.asr);
+            }
+            Some(SplitFragment::<'c> {
+                db: &mut self.base.db,
+                proof: &mut self.base.proof,
+            })
+        }
+    }
+    pub fn extract(mut self) -> SplitterData {
+        self.base.stats.record_split_time();
+        SplitterData {
+            db: self.base.db,
+            result: self.base.idmap.extract(),
+            qed: self.base.qed.unwrap(),
+            stats: self.base.stats
+        }
     }
 }
 
-#[cfg(test)]
-pub mod test {
-    use std::{
-        fs::{File},
-        path::{Path},
-        convert::{TryFrom},
-    };
-    use crate::{
-        textparser::{TextAsrParser},
-        io::{InputReader, MainOutput, MutedOutput},
-        integrity::{IntegrityVerifier, IntegrityError, EqFilePosition, IntegritySection},
-        basic::{Variable, Literal, MaybeVariable, ClauseIndex},
-    };
+pub struct SplitFragment<'a> {
+    db: &'a mut CheckerDb,
+    proof: &'a mut BackwardsProof,
+}
+impl<'a> SplitFragment<'a> {
+    pub fn dump<W: Write>(mut self, wt: &mut W) {
+        self.proof.write(&mut self.db, wt).unwrap_or_else(|e| panic!(format!("{}", e)));
+    }
+}
+impl<'a> Drop for SplitFragment<'a> {
+    fn drop(&mut self) {
+        self.proof.clean(&mut self.db);
+    }
 }

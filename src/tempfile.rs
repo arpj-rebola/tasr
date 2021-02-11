@@ -1,61 +1,81 @@
 use std::{
-    path::{PathBuf, Path},
-    fs::{OpenOptions, self, File},
-    io::{ErrorKind as IoErrorKind, Error as IoError, self, BufWriter, BufReader},
+    fs::{self, OpenOptions, File},
+    io::{self, Write, ErrorKind as IoErrorKind, Error as IoError, BufReader},
+    path::{Path, PathBuf},
 };
 
 use rand::{
     self, Rng
 };
 
-use crate::{
-    io::{OutputWriter, InputReader},
-};
 
-pub struct SplittingFiles {
+pub struct TempFiles {
     root: PathBuf,
     split: Vec<PathBuf>,
-    binary: bool,
+    trimmed: Vec<PathBuf>,
+    core: Option<PathBuf>,
 }
-impl SplittingFiles {
-    pub fn new(path: &Path, binary: bool) -> SplittingFiles {
+impl TempFiles {
+    pub fn new(path: &Path) -> TempFiles {
         if !path.is_dir() {
-            fs::create_dir_all(path).unwrap_or_else(|err| SplittingFiles::temp_dir_error(path, err));
+            fs::create_dir_all(path).unwrap_or_else(|err| TempFiles::temp_dir_error(path, err));
         }
-        SplittingFiles {
+        TempFiles {
             root: PathBuf::from(path),
             split: Vec::new(),
-            binary: binary,
+            trimmed: Vec::new(),
+            core: None,
         }
     }
-    pub fn get(&mut self) -> OutputWriter<'_> {
-        match self.generate() {
-            Some((path, file)) => {
-                self.split.push(path);
-                OutputWriter::new(file, self.split.last().unwrap())
-            },
-            None => SplittingFiles::naming_error(self.root.as_path()),
+    pub fn split(&mut self) -> SplitTempFiles<'_> {
+        SplitTempFiles::<'_> { temp: self }
+    }
+    pub fn trimmed(&mut self) -> TrimmedTempFiles<'_> {
+        let index = self.split.len();
+        TrimmedTempFiles::<'_> {
+            temp: self,
+            index: index,
         }
     }
-    pub fn trimming_files(self) -> TrimmingFiles {
-        TrimmingFiles {
-            sf: self,
-            trim: Vec::new(),
-            held: None,
+    pub fn conflate<W: Write>(self, source: &Path, count: u64, wt: &mut W) {
+        let mut core: bool = true;
+        for path in self.core.iter().chain(self.trimmed.iter()) {
+            let mut file = match OpenOptions::new().read(true).open(&path) {
+                Ok(file) => BufReader::new(file),
+                Err(err) => TempFiles::opening_error(&path, err),
+            };
+            if core {
+                write!(wt, "p source \"{}\"\n", source.to_string_lossy().escape_default())
+                    .unwrap_or_else(|err| panic!(format!("{}", err)));
+                write!(wt, "p count {}\n", count)
+                    .unwrap_or_else(|err| panic!(format!("{}", err)));
+                write!(wt, "p core\n")
+                    .unwrap_or_else(|err| panic!(format!("{}", err)));
+            }
+            io::copy(&mut file, wt).unwrap_or_else(|err| panic!(format!("{}", err)));
+            if core {
+                write!(wt, "p proof\n")
+                    .unwrap_or_else(|err| panic!(format!("{}", err)));
+            }
+            core = false;
+            if path.exists() {
+                fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
+            }
         }
     }
-    fn generate(&self) -> Option<(PathBuf, File)> {
+    pub fn clear(&mut self) {
+        self.split.clear();
+        self.trimmed.clear();
+    }
+    fn generate(&self) -> (PathBuf, File) {
         let mut rng = rand::thread_rng();
-        let mut count = 0usize;
         loop {
-            count += 1usize;
             let num: u64 = rng.gen();
             let filename = self.root.join(&Path::new(&format!("temp_{:x}.tmp", num)));
             match OpenOptions::new().write(true).create_new(true).open(&filename) {
-                Ok(file) => break Some((filename, file)),
-                Err(e) if e.kind() == IoErrorKind::AlreadyExists && count < 100000usize => (),
-                Err(e) if e.kind() == IoErrorKind::AlreadyExists => break None,
-                Err(e) => SplittingFiles::creation_error(&filename, e),
+                Ok(file) => break (filename, file),
+                Err(e) if e.kind() != IoErrorKind::AlreadyExists => TempFiles::creation_error(&filename, e),
+                _ => (),
             }
         }
     }
@@ -64,11 +84,6 @@ impl SplittingFiles {
             append!(lock, "Could not create a temporary directory in {}:", path.to_str().unwrap());
             breakline!(lock);
             append!(lock, "{}", err);
-        })
-    }
-    fn naming_error(path: &Path) -> ! {
-        panick!("unable to name temporary file", lock, {
-            append!(lock, "Could not find an available temporary filename in {}.", path.to_str().unwrap());
         })
     }
     fn creation_error(path: &Path, err: IoError) -> ! {
@@ -93,92 +108,63 @@ impl SplittingFiles {
         })
     }
 }
-impl Drop for SplittingFiles {
-    fn drop(&mut self) {
-        for path in &self.split {
-            fs::remove_file(path).unwrap_or_else(|err| SplittingFiles::deletion_error(path.as_path(), err));
-        }
+// impl Drop for TempFiles {
+//     fn drop(&mut self) {
+//         for path in &self.split {
+//             if path.exists() {
+//                 fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
+//             }
+//         }
+//         for path in &self.trimmed {
+//             if path.exists() {
+//                 fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
+//             }
+//         }
+//         if let Some(path) = &self.core {
+//             if path.exists() {
+//                 fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
+//             }
+//         }
+//     }
+// }
+
+pub struct SplitTempFiles<'a> {
+    temp: &'a mut TempFiles
+}
+impl<'a> SplitTempFiles<'a> {
+    pub fn get(&mut self) -> (&Path, File) {
+        let (pb, file) = self.temp.generate();
+        self.temp.split.push(pb);
+        (self.temp.split.last().unwrap(), file)
     }
 }
 
-pub struct TrimmingFiles {
-    sf: SplittingFiles,
-    trim: Vec<PathBuf>,
-    held: Option<PathBuf>,
+pub struct TrimmedTempFiles<'a> {
+    temp: &'a mut TempFiles,
+    index: usize,
 }
-impl TrimmingFiles {
-    pub fn get(&mut self) -> Option<(InputReader<'_>, OutputWriter<'_>)> {
-        if let Some(path) = self.held.take() {
-            fs::remove_file(&path).unwrap_or_else(|err| SplittingFiles::deletion_error(path.as_path(), err));
+impl<'a> TrimmedTempFiles<'a> {
+    pub fn get(&mut self) -> Option<(&Path, &Path, File)> {
+        if let Some(path) = self.temp.split.get(self.index) {
+            if path.exists() {
+                fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
+            }
         }
-        let split_path = self.sf.split.pop()?;
-        let split_file = match OpenOptions::new().read(true).open(&split_path) {
-            Ok(file) => file,
-            Err(err) => SplittingFiles::opening_error(&split_path, err),
-        };
-        self.held = Some(split_path);
-        let (trim_path, trim_file) = self.sf.generate().unwrap_or_else(|| SplittingFiles::naming_error(self.sf.root.as_path()));
-        self.trim.push(trim_path);
-        let input = InputReader::new(split_file, self.held.as_ref().unwrap(), self.sf.binary);
-        let output = OutputWriter::new(trim_file, self.trim.last().unwrap());
-        Some((input, output))
-    }
-    pub fn output(self, out: &Path) -> PreprocessedFile {
-        PreprocessedFile {
-            tf: self,
-            out: PathBuf::from(out),
+        if self.index == 0usize {
+            None
+        } else {
+            self.index -= 1usize;
+            let path_split = unsafe { self.temp.split.get_unchecked(self.index) };
+            let (pb_trim, file_trim) = self.temp.generate();
+            self.temp.trimmed.push(pb_trim);
+            let path_trim = self.temp.trimmed.last().unwrap();
+            Some((path_split, path_trim, file_trim))
         }
     }
-}
-impl Drop for TrimmingFiles {
-    fn drop(&mut self) {
-        if let Some(path) = self.held.take() {
-            self.trim.push(path);
-        }
-        for path in &self.trim {
-            fs::remove_file(path).unwrap_or_else(|err| SplittingFiles::deletion_error(path.as_path(), err));
-        }
-    }
-}
-
-pub struct PreprocessedFile {
-    tf: TrimmingFiles,
-    out: PathBuf,
-}
-impl PreprocessedFile {
-    pub fn get(&mut self) -> OutputWriter<'_> {
-        let file = match OpenOptions::new().write(true).truncate(true).create(true).open(&self.out) {
-            Ok(file) => file,
-            Err(e) => PreprocessedFile::creation_error(&self.out, e),
-        };
-        OutputWriter::new(file, &self.out)
-    }
-    pub fn flush(&mut self) {
-        let mut output_file = {
-            let file = OpenOptions::new().append(true).open(&self.out).unwrap_or_else(|err| PreprocessedFile::opening_error(&self.out, err));
-            BufWriter::with_capacity(!(!0usize << 16), file)
-        };
-        while let Some(input_path) = self.tf.trim.pop() {
-            let mut input_file = {
-                let file = OpenOptions::new().read(true).open(&input_path).unwrap_or_else(|err| SplittingFiles::opening_error(&input_path, err));
-                BufReader::with_capacity(!(!0usize << 16), file)
-            };
-            io::copy(&mut input_file, &mut output_file).unwrap_or_else(|err| panic!(format!("{}", err)));
-            fs::remove_file(&input_path).unwrap_or_else(|err| SplittingFiles::deletion_error(&input_path, err));
-        }
-    }
-    fn creation_error(path: &Path, err: IoError) -> ! {
-        panick!("unable to create output file", lock, {
-            append!(lock, "Could not generate proof preprocessing output file in {}:", path.to_str().unwrap());
-            breakline!(lock);
-            append!(lock, "{}", err);
-        })
-    }
-    fn opening_error(path: &Path, err: IoError) -> ! {
-        panick!("unable to open output file", lock, {
-            append!(lock, "Could not open proof preprocessing output file in {}:", path.to_str().unwrap());
-            breakline!(lock);
-            append!(lock, "{}", err);
-        })
+    pub fn core(self) -> (&'a Path, File) {
+        self.temp.trimmed.reverse();
+        let (pb, file) = self.temp.generate();
+        self.temp.core = Some(pb);
+        (self.temp.core.as_ref().unwrap(), file)
     }
 }

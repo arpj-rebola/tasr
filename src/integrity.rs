@@ -1,706 +1,605 @@
 use std::{
-    time::{Instant},
-    path::{Path},
+    mem::{self},
+    time::{Instant, Duration},
+    path::{PathBuf},
+    io::{Write},
+};
+
+use either::{
+    Either, Left, Right,
 };
 
 use crate::{
-    basic::{MaybeClauseIndex, MaybeVariable, Literal, ClauseIndex, Variable, InstructionNumber, InstructionNumberKind},
-    mapping::{LiteralSet, IndexSet, InstructionLoader},
-    substitution::{SubstitutionInsertion, Substitution},
-    textparser::{TextAsrParser, TextClauseParser, TextWitnessParser, TextChainParser, TextMultichainParser, AsrParsedInstructionKind},
-    io::{FilePositionRef, FilePosition},
-    display::{CsvDisplay, ClauseDisplay, SubstitutionDisplay, MappingDisplay, ChainDisplay, CsvDisplayMap},
+    io::{FilePosition, PathFilePosition, DeferredPosition, InputReader},
+    basic::{Literal, Variable, ClauseIndex, InstructionNumber},
+    model::{Model},
+    substitution::{Substitution},
+    idflags::{ClauseIndexFlags},
+    display::{DisplayClause, DisplayLiteralCsv, DisplayLiteralPairCsv, DisplaySubstitution, DisplaySubstitutionMappingCsv, DisplaySubstitutionMultimappingCsv, DisplayChain, DisplayClauseIndexCsv},
+    textparser::{PrepParsedInstruction, PrepParsedInstructionKind, TextAsrParser, TextClauseParser, TextChainParser, TextWitnessParser, TextMultichainParser},
+    buffer::{ClauseBuffer, WitnessBuffer, ChainBuffer, MultichainBuffer},
 };
 
-pub struct EqFilePosition(pub FilePosition);
-impl EqFilePosition {
-    fn dummy() -> EqFilePosition {
-        EqFilePosition(FilePosition::new(Path::new(""), false))
-    }
+pub struct VariableCounter {
+    val: u32
 }
-impl PartialEq for EqFilePosition {
-    fn eq(&self, _: &EqFilePosition) -> bool {
-        true
+impl VariableCounter {
+    pub fn new() -> VariableCounter {
+        VariableCounter { val: 0u32 }
+    }
+    pub fn update_variable(&mut self, var: Variable) {
+        self.val = unsafe { self.val.max(mem::transmute::<Variable, u32>(var) >> 1) }
+    }
+    pub fn update_literal(&mut self, lit: Literal) {
+        self.val = unsafe { self.val.max(mem::transmute::<Literal, u32>(lit) >> 1) }
+    }
+    pub fn get(&self) -> u32 {
+        self.val
     }
 }
 
-#[derive(PartialEq)]
+pub struct ClauseIndexCounter {
+    val: u64
+}
+impl ClauseIndexCounter {
+    pub fn new() -> ClauseIndexCounter {
+        ClauseIndexCounter { val: 0u64 }
+    }
+    pub fn update(&mut self, id: ClauseIndex) {
+        self.val = unsafe { self.val.max(mem::transmute::<ClauseIndex, u64>(id)) }
+    }
+    pub fn get(&self) -> u64 {
+        self.val
+    }
+}
+
 pub enum IntegrityError {
-    InvalidNumberOfVariables(EqFilePosition, MaybeVariable, MaybeVariable),
-    InvalidNumberOfClauses(EqFilePosition, u64, u64),
-    InvalidInstructionNumber(EqFilePosition, InstructionNumber, InstructionNumberKind),
-    InvalidClause(EqFilePosition, Option<ClauseIndex>, InstructionNumber, Vec<Literal>, Vec<Literal>),
-    InvalidWitness(EqFilePosition, ClauseIndex, InstructionNumber, Vec<(Variable, Literal)>, Vec<(Variable, Literal)>, Vec<(Variable, Vec<Literal>)>),
-    ConflictingId(EqFilePosition, ClauseIndex, InstructionNumber),
-    ChainMissingId(EqFilePosition, ClauseIndex, InstructionNumber, Option<ClauseIndex>, Vec<ClauseIndex>, Vec<ClauseIndex>),
-    MissingIdSubchain(EqFilePosition, ClauseIndex, InstructionNumber, ClauseIndex, bool),
-    RepeatedIdSubchain(EqFilePosition, ClauseIndex, InstructionNumber, ClauseIndex, bool),
-    MissingDeletionId(EqFilePosition, ClauseIndex, InstructionNumber),
-    MissingQed(EqFilePosition),
+    InvalidNumberOfVariables(PathFilePosition, u32, u32),
+    InvalidNumberOfClauses(PathFilePosition, u64, u64),
+    InvalidNumberOfInstructions(PathFilePosition, u64, u64),
+    InvalidClause(DeferredPosition, Option<ClauseIndex>, InstructionNumber, Vec<Literal>, Vec<Literal>, Vec<(Literal, Literal)>),
+    InvalidWitness(DeferredPosition, ClauseIndex, InstructionNumber, Vec<(Variable, Literal)>, Vec<(Variable, Literal)>, Vec<(Variable, Vec<Literal>)>),
+    ConflictingId(DeferredPosition, ClauseIndex, InstructionNumber),
+    ChainMissingId(DeferredPosition, ClauseIndex, InstructionNumber, Option<ClauseIndex>, Vec<ClauseIndex>, Vec<ClauseIndex>),
+    InvalidLateralId(DeferredPosition, ClauseIndex, InstructionNumber, Vec<ClauseIndex>, Vec<ClauseIndex>, Vec<ClauseIndex>, Vec<ClauseIndex>),
+    MissingDeletionId(DeferredPosition, ClauseIndex, InstructionNumber),
+    MissingQed(PathFilePosition),
+}
+impl IntegrityError {
+    pub fn show(&self) {
+        match self {
+            IntegrityError::InvalidNumberOfVariables(pos, declared, found) => {
+                error!("incorrect number of variables" @ pos, lock, {
+                    append!(lock, "The DIMACS header declares {} variables, ", declared);
+                    append!(lock, "but the maximum variable throughout the premises is {}.", found);
+                });
+            },
+            IntegrityError::InvalidNumberOfClauses(pos, declared, found) => {
+                error!("incorrect number of clauses" @ pos, lock, {
+                    append!(lock, "The DIMACS header declares {} clauses, ", declared);
+                    append!(lock, "but the premises contain {} clauses.", found);
+                });
+            },
+            IntegrityError::InvalidNumberOfInstructions(pos, declared, found) => {
+                error!("incorrect number of instructions" @ pos, lock, {
+                    append!(lock, "The ASR proof 'p count' header declares {} instructions, ", declared);
+                    append!(lock, "but the ASR file contains {} core and proof instructions.", found);
+                });
+            },
+            IntegrityError::InvalidClause(pos, opt_id, num, clause, reps, confs) => {
+                error!("invalid clause" @ pos, lock, {
+                    append!(lock, "The invalid clause {} is introduced ", DisplayClause(&clause));
+                    if let Some(id) = opt_id {
+                        append!(lock, "with identifier {} ", id);
+                    }
+                    append!(lock, "in {}.", num);
+                    breakline!(lock);
+                    if reps.len() == 1usize {
+                        append!(lock, "The literal {} in the clause is repeated.", DisplayLiteralCsv(&reps));
+                    } else if reps.len() > 1usize {
+                        append!(lock, "Literals {} in the clause are repeated.", DisplayLiteralCsv(&reps));
+                    }
+                    if reps.len() != 0usize && confs.len() != 0usize {
+                        breakline!(lock);
+                    }
+                    if reps.len() == 1usize {
+                        append!(lock, "The clause contains the complementary pair of literals {}.", DisplayLiteralPairCsv(&confs));
+                    } else if reps.len() > 1usize {
+                        append!(lock, "The clause contains the complementary pairs of literals {}.", DisplayLiteralPairCsv(&confs));
+                    }
+                });
+            },
+            IntegrityError::InvalidWitness(pos, id, num, witness, reps, confs) => {
+                error!("invalid substitution" @ pos, lock, {
+                    append!(lock, "A clause is intrudiced as a WSR with identifier {} in {}", id, num);
+                    append!(lock, "with the invalid witness substitution {}.", DisplaySubstitution(&witness));
+                    breakline!(lock);
+                    if reps.len() == 1usize {
+                        append!(lock, "The mapping {} in the substitution is repeated.", DisplaySubstitutionMappingCsv(&reps));
+                    } else if reps.len() > 1usize {
+                        append!(lock, "Mappings {} in the substitution are repeated.", DisplaySubstitutionMappingCsv(&reps));
+                    }
+                    if reps.len() != 0usize && confs.len() != 0usize {
+                        breakline!(lock);
+                    }
+                    if reps.len() == 1usize {
+                        append!(lock, "The substitution contains the conflicting mapping {}.", DisplaySubstitutionMultimappingCsv(&confs));
+                    } else if reps.len() > 1usize {
+                        append!(lock, "The substitution contains the conflicting mappings {}.", DisplaySubstitutionMultimappingCsv(&confs));
+                    }
+                });
+            },
+            IntegrityError::ConflictingId(pos, id, num) => {
+                error!("conflicting clause identifier" @ pos, lock, {
+                    append!(lock, "A clause is introduced with identifier {} in {}, ", id, num);
+                    append!(lock, "but this identifier is already in use for another clause.");
+                });
+            },
+            IntegrityError::ChainMissingId(pos, id, num, latid, chain, missing) => {
+                error!("missing clause identifier" @ pos, lock, {
+                    append!(lock, "A clause is introduced as a ");
+                    match latid {
+                        None => append!(lock, "RUP inference "),
+                        Some(_) => append!(lock, "WSR inference "),
+                    }
+                    append!(lock, "with identifier {} in {} ", id, num);
+                    match latid {
+                        None => append!(lock, "through the invalid RUP chain {}.", DisplayChain(&chain)),
+                        Some(lat) => append!(lock, "through a WSR multichain which contains the invalid RUP chain {} for the lateral clause with identifier {}.", DisplayChain(&chain), lat),
+                    }
+                    breakline!(lock);
+                    if missing.len() == 1usize {
+                        append!(lock, "The RUP chain contains the missing clause identifier {}.", DisplayClauseIndexCsv(&missing));
+                    } else if missing.len() > 1usize {
+                        append!(lock, "The RUP chain contains the missing clause identifiers {}.", DisplayClauseIndexCsv(&missing));
+                    }
+                });
+            },
+            IntegrityError::InvalidLateralId(pos, id, num, laterals, chain_missing, dels_missing, repeated) => {
+                error!("invalid lateral clause identifier" @ pos, lock, {
+                    append!(lock, "A clause is introduced as a WSR inference with identifier {} in {} with an invalid WSR multichain ", id, num);
+                    append!(lock, "containing RUP chains or implicit deletions for the lateral clause");
+                    if laterals.len() <= 1usize {
+                        append!(lock, " with identifier {}.", DisplayClauseIndexCsv(&laterals));
+                    } else {
+                        append!(lock, "s with identifiers {}.", DisplayClauseIndexCsv(&laterals));
+                    }
+                    if !chain_missing.is_empty() {
+                        breakline!(lock);
+                    }
+                    if chain_missing.len() == 1usize {
+                        append!(lock, "A RUP chain is specified for the lateral clause with identifier {}, but this clause is missing.", DisplayClauseIndexCsv(&chain_missing));
+                    } else if chain_missing.len() > 1usize {
+                        append!(lock, "RUP chains are specified for the lateral clauses with identifiers {}, but these clauses are missing.", DisplayClauseIndexCsv(&chain_missing));
+                    }
+                    if !dels_missing.is_empty() {
+                        breakline!(lock);
+                    }
+                    if dels_missing.len() == 1usize {
+                        append!(lock, "An implicit deletion is specified for the lateral clause with identifier {}, but this clause is missing.", DisplayClauseIndexCsv(&dels_missing));
+                    } else if dels_missing.len() > 1usize {
+                        append!(lock, "Implicit deletions are specified for the lateral clauses with identifiers {}, but these clauses are missing.", DisplayClauseIndexCsv(&dels_missing));
+                    }
+                    if !repeated.is_empty() {
+                        breakline!(lock);
+                    }
+                    if repeated.len() == 1usize {
+                        append!(lock, "Multiple RUP chains or implicit deletions are specified for the lateral clause with identifier {}.", DisplayClauseIndexCsv(&dels_missing));
+                    } else if repeated.len() > 1usize {
+                        append!(lock, "Multiple RUP chains or implicit deletions are specified for the lateral clauses with identifiers {}.", DisplayClauseIndexCsv(&dels_missing));
+                    }
+                });
+            },
+            IntegrityError::MissingDeletionId(pos, id, num) => {
+                error!("missing clause deletion identifier" @ pos, lock, {
+                    append!(lock, "A clause with identifier {} is deleted in {}, but this clause is missing.", id, num);
+                });
+            },
+            IntegrityError::MissingQed(pos) => {
+                error!("missing contradiction" @ pos, lock, {
+                    append!(lock, "Neither the core nor the proof contain a contradiction clause.");
+                });
+            },
+        }
+    }
 }
 
 pub struct IntegrityStats {
-    pub max_variable: MaybeVariable,
-    pub max_clauseid: MaybeClauseIndex,
-    pub num_premises: InstructionNumber,
-    pub num_cores: InstructionNumber,
-    pub num_instructions: InstructionNumber,
+    pub max_var: VariableCounter,
+    pub max_id: ClauseIndexCounter,
+    pub num_premises: u64,
+    pub num_cores: u64,
+    pub num_instructions: u64,
     pub num_rup: u64,
     pub num_wsr: u64,
     pub num_del: u64,
-    pub first_qed: Option<InstructionNumber>,
+    pub first_qed: Option<(InstructionNumber, ClauseIndex)>,
     pub errors: Vec<IntegrityError>,
-    pub start_time: Instant,
-    pub cnf_time: Instant,
-    pub asr_time: Instant,
+    start_time: Instant,
+    pub cnf_time: Option<Duration>,
+    pub asr_time: Option<Duration>,
 }
 impl IntegrityStats {
-    pub fn new() -> IntegrityStats {
-        let now = Instant::now();
+    fn new() -> IntegrityStats {
         IntegrityStats {
-            max_variable: MaybeVariable::new(None),
-            max_clauseid: MaybeClauseIndex::new(None),
-            num_premises: InstructionNumber::new(InstructionNumberKind::Premise),
-            num_cores: InstructionNumber::new(InstructionNumberKind::Core),
-            num_instructions: InstructionNumber::new(InstructionNumberKind::Proof),
+            max_var: VariableCounter::new(),
+            max_id: ClauseIndexCounter::new(),
+            num_premises: 0u64,
+            num_cores: 0u64,
+            num_instructions: 0u64,
             num_rup: 0u64,
             num_wsr: 0u64,
             num_del: 0u64,
             first_qed: None,
             errors: Vec::new(),
-            start_time: now,
-            cnf_time: now,
-            asr_time: now,
-        }
-    }
-    pub fn is_ok(&self) -> bool {
-        self.errors.is_empty()
-    }
-    fn invalid_num_variables(&mut self, pos: &FilePositionRef<'_>, var: MaybeVariable) {
-        error!("incorrect number of variables" @ pos, lock, {
-            append!(lock, "The DIMACS header declares {} variables, ", var);
-            append!(lock, "but the maximum variable throughout the premises is {}.", self.max_variable);
-        });
-        self.errors.push(IntegrityError::InvalidNumberOfVariables(
-            EqFilePosition(pos.position()), var, self.max_variable));
-    }
-    fn invalid_num_clauses(&mut self, pos: &FilePositionRef<'_>, cls: u64) {
-        error!("incorrect number of clauses" @ pos, lock, {
-            append!(lock, "The DIMACS header declares {} clauses, ", cls);
-            append!(lock, "but the premises contain {} clauses.", self.num_premises.number());
-        });
-        self.errors.push(IntegrityError::InvalidNumberOfClauses(
-            EqFilePosition(pos.position()), cls, self.num_premises.number()));
-    }
-    fn invalid_instruction_number(&mut self, pos: &FilePositionRef<'_>, section: InstructionNumberKind, num: InstructionNumber) {
-        error!("invalid instruction number" @ pos, lock, {
-            append!(lock, "An instruction references '{}' as instruction number, ", num.text());
-            append!(lock, "but it is located in the {} section of the ASR file.", match section {
-                InstructionNumberKind::Premise => "premise",
-                InstructionNumberKind::Core => "core",
-                InstructionNumberKind::Proof => "proof",
-            });
-        });
-        self.errors.push(IntegrityError::InvalidInstructionNumber(
-            EqFilePosition(pos.position()), num, section))
-    }
-    fn conflict_id(&mut self, pos: &FilePositionRef<'_>, section: InstructionNumberKind, id: ClauseIndex) {
-        let count = *self.count(section);
-        error!("conflicting clause identifier" @ pos, lock, {
-            append!(lock, "A clause is introduced with identifier {} in {}, ", id, count);
-            append!(lock, "but this identifier is already in use for another clause.");
-        });
-        self.errors.push(IntegrityError::ConflictingId(
-            EqFilePosition(pos.position()), id, count));
-    }
-    fn missing_id_subchain(&mut self, pos: &FilePositionRef<'_>, central: ClauseIndex, lateral: ClauseIndex, subchain: bool) {
-        error!("missing lateral subchain" @ pos, lock, {
-            append!(lock, "A clause is introduced as a WSR inference ");
-            append!(lock, "with identifier {} in {}; ", central, self.num_instructions);
-            append!(lock, "the WSR multichain specifies ");
-            if subchain {
-                append!(lock, "a RUP chain ");
-            } else {
-                append!(lock, "an implicit deletion ");
-            }
-            append!(lock, "for the lateral clause with identifier {}, but this clause is missing.", lateral);
-        });
-        self.errors.push(IntegrityError::MissingIdSubchain(
-            EqFilePosition(pos.position()), central, self.num_instructions, lateral, subchain));
-    }
-    fn repeated_id_subchain(&mut self, pos: &FilePositionRef<'_>, central: ClauseIndex, lateral: ClauseIndex, subchain: bool) {
-        error!("repeated lateral subchain" @ pos, lock, {
-            append!(lock, "A clause is introduced as a WSR inference ");
-            append!(lock, "with identifier {} in {}; ", central, self.num_instructions);
-            append!(lock, "the WSR multichain specifies ");
-            if subchain {
-                append!(lock, "a RUP chain ");
-            } else {
-                append!(lock, "an implicit deletion ");
-            }
-            append!(lock, "for the lateral clause with identifier {}, ", lateral);
-            append!(lock, "but another RUP chain or implicit deletion is specified for this lateral clause in the same multichain.");
-        });
-        self.errors.push(IntegrityError::RepeatedIdSubchain(
-            EqFilePosition(pos.position()), central, self.num_instructions, lateral, subchain));
-    }
-    fn missing_deletion_id(&mut self, pos: &FilePositionRef<'_>, id: ClauseIndex) {
-        error!("missing clause deletion identifier" @ pos, lock, {
-            append!(lock, "A clause with identifier {} is deleted in {}, ", id, self.num_instructions);
-            append!(lock, "but this clause is missing.");
-        });
-        self.errors.push(IntegrityError::MissingDeletionId(
-            EqFilePosition(pos.position()), id, self.num_instructions))
-    }
-    fn missing_qed(&mut self, pos: &FilePositionRef<'_>) {
-        error!("missing contradiction" @ pos, lock, {
-            append!(lock, "Neither the core nor the proof contain a contradiction clause.");
-        });
-        self.errors.push(IntegrityError::MissingQed(
-            EqFilePosition(pos.position())))
-    }
-    fn invalid_clause(&mut self, pos: &FilePositionRef<'_>, section: InstructionNumberKind, issues: &ClauseIssues, id: Option<ClauseIndex>) {
-        let count = *self.count(section);
-        error!("invalid clause" @ pos, lock, {
-            append!(lock, "The clause {} is introduced ", ClauseDisplay(&issues.clause));
-            if let Some(cid) = id {
-                append!(lock, "with identifier {} ", cid);
-            }
-            append!(lock, "in {}; ", count);
-            if issues.repetitions.len() <= 1 {
-                append!(lock, "the literal {} in the clause is repeated.", CsvDisplay(&issues.repetitions));
-            } else {
-                append!(lock, "literals {} in the clause are repeated.", CsvDisplay(&issues.repetitions));
-            }
-        });
-        self.errors.push(IntegrityError::InvalidClause(
-            EqFilePosition(pos.position()), id, count, issues.clause.clone(), issues.repetitions.clone()));
-    }
-    fn missing_id(&mut self, pos: &FilePositionRef<'_>, issues: &ChainIssues, id: ClauseIndex, lateral: Option<ClauseIndex>) {
-        error!("missing clause identifier" @ pos, lock, {
-            append!(lock, "A clause is introduced as a ");
-            match lateral {
-                None => append!(lock, "RUP inference "),
-                Some(_) => append!(lock, "WSR inference "),
-            }
-            append!(lock, "with identifier {} in {} ", id, self.num_instructions);
-            match lateral {
-                None => append!(lock, "through the RUP chain {}; ", ChainDisplay(&issues.chain)),
-                Some(lat) => append!(lock, "through a WSR multichain which contains the RUP chain {} for the lateral clause with identifier {}; ", ChainDisplay(&issues.chain), lat),
-            }
-            if issues.missing.len() <= 1 {
-                append!(lock, "the clause with identifier {} in the chain is missing", CsvDisplay(&issues.missing));
-            } else {
-                append!(lock, "clauses with identifiers {} in the chain are missing", CsvDisplay(&issues.missing));
-            }
-        });
-        self.errors.push(IntegrityError::ChainMissingId(
-            EqFilePosition(pos.position()), id, self.num_instructions, lateral, issues.chain.clone(), issues.missing.clone()))
-    }
-    fn invalid_witness(&mut self, pos: &FilePositionRef<'_>, issues: &WitnessIssues, id: ClauseIndex) {
-        error!("invalid substitution witness" @ pos, lock, {
-            append!(lock, "A clause is introduced as a WSR with identifier {} in {} ", id, self.num_instructions);
-            append!(lock, "with the witness {}; ", SubstitutionDisplay(&issues.witness));
-            if !issues.repeated.is_empty() {
-                if issues.repeated.len() <= 1usize {
-                    append!(lock, "the mapping {} in the witness is repeated", CsvDisplayMap(|x| MappingDisplay(x), &issues.repeated));
-                } else {
-                    append!(lock, "mappings {} in the witness are repeated", CsvDisplayMap(|x| MappingDisplay(x), &issues.repeated));
-                }
-            }
-            if !issues.repeated.is_empty() && !issues.conflict.is_empty() {
-                append!(lock, " and ");
-            }
-            if !issues.conflict.is_empty() {
-                let mut vec: Vec<(Variable, Literal)> = Vec::new();
-                for (var, lits) in &issues.conflict {
-                    for lit in lits {
-                        vec.push((*var, *lit));
-                    }
-                }
-                if issues.conflict.len() <= 1usize {
-                    append!(lock, "the mapping {} in the witness are inconsistent", CsvDisplayMap(|x| MappingDisplay(x), &vec));
-                } else {
-                    append!(lock, "mappings {} in the witness are inconsistent", CsvDisplayMap(|x| MappingDisplay(x), &vec));
-                }
-            }
-            append!(lock, ".");
-        });
-        self.errors.push(IntegrityError::InvalidWitness(
-            EqFilePosition(pos.position()), id, self.num_instructions, issues.witness.clone(), issues.repeated.clone(), issues.conflict.clone()))
-    }
-    fn error_instruction_number(&mut self, num: InstructionNumber) -> ! {
-        panick!("checker capacity exceeded", lock, {
-            append!(lock, "The input proof contains more than {} premise clauses, core clauses or proof instructions, which exceeds the checker capacity of {}.", num.number(), InstructionNumber::MaxValue);
-        })
-    }
-    fn count(&self, section: InstructionNumberKind) -> &InstructionNumber {
-        match section {
-            InstructionNumberKind::Premise => &self.num_premises,
-            InstructionNumberKind::Core => &self.num_cores,
-            InstructionNumberKind::Proof => &self.num_instructions,
+            start_time: Instant::now(),
+            cnf_time: None,
+            asr_time: None,
         }
     }
     fn record_cnf_time(&mut self) {
-        let now = Instant::now();
-        self.cnf_time = now;
-        self.asr_time = now;
+        self.cnf_time = Some(Instant::now().duration_since(self.start_time));
+        self.start_time = Instant::now();
     }
     fn record_asr_time(&mut self) {
-        let now = Instant::now();
-        self.asr_time = now;
+        self.asr_time = Some(Instant::now().duration_since(self.start_time));
+        self.start_time = Instant::now();
     }
-    fn increase_premises(&mut self) {
-        self.num_premises = self.num_premises.succ().unwrap_or_else(|| self.error_instruction_number(self.num_premises))
+    fn new_premise(&mut self) {
+        self.num_premises += 1u64;
     }
-    fn increase_cores(&mut self) {
-        self.num_cores = self.num_cores.succ().unwrap_or_else(|| self.error_instruction_number(self.num_cores))
+    fn new_core(&mut self) {
+        self.num_cores += 1u64;
     }
-    fn increase_instructions(&mut self) {
-        self.num_instructions = self.num_instructions.succ().unwrap_or_else(|| self.error_instruction_number(self.num_instructions))
+    fn new_instruction(&mut self) {
+        self.num_instructions += 1u64;
     }
-    fn record_qed(&mut self, section: InstructionNumberKind) {
-        if let None = self.first_qed {
-            let new = *self.count(section);
-            self.first_qed = Some(new);
-        }
+    fn new_rup(&mut self) {
+        self.num_rup += 1u64;
     }
+    fn new_wsr(&mut self) {
+        self.num_wsr += 1u64;
+    }
+    fn new_del(&mut self) {
+        self.num_del += 1u64;
+    }
+    fn update_literal(&mut self, lit: Literal) {
+        self.max_var.update_literal(lit)
+    }
+    fn update_variable(&mut self, var: Variable) {
+        self.max_var.update_variable(var)
+    }
+    fn update_index(&mut self, id: ClauseIndex) {
+        self.max_id.update(id)
+    }
+    fn check_variables(&self, vars: u32) -> bool {
+        self.max_var.get() <= vars
+    }
+    fn check_clauses(&self, cls: u64) -> bool {
+        self.num_premises == cls
+    }
+    fn log_error(&mut self, err: IntegrityError) {
+        self.errors.push(err)
+    }
+}
+
+pub struct IntegrityConfig {
+    pub preprocessing: bool,
+    pub select: u64,
+    pub parts: u64,
+}
+impl IntegrityConfig {
+    fn lower(&self, total: u64) -> u64 {
+        (((total as u128) * (self.select as u128)) / (self.parts as u128)) as u64
+    }
+    fn upper(&self, total: u64) -> u64 {
+        u64::max((((total as u128) * (self.select as u128 + 1u128)) / (self.parts as u128)) as u64, total)
+    }
+}
+
+pub struct IntegrityData {
+    pub insertions: Vec<u64>,
+    pub end: InstructionNumber,
+    pub qed: ClauseIndex,
 }
 
 pub struct IntegrityVerifier {
-    clause: ClauseIssues,
-    chain: ChainIssues,
-    witness: WitnessIssues,
-    lits: LiteralSet,
-    slots: IndexSet,
-    marks: IndexSet,
-    subchains: Vec<(ClauseIndex, bool)>,
+    clause: ClauseBuffer,
+    chain: ChainBuffer,
+    witness: WitnessBuffer,
+    mchain: MultichainBuffer,
+    model: Model,
+    idflags: ClauseIndexFlags<u64>,
     subst: Substitution,
-    loader: InstructionLoader,
-    limit: InstructionNumber,
+    insertions: Option<Vec<u64>>,
     stats: IntegrityStats,
+    config: IntegrityConfig,
+    current: InstructionNumber,
+    countdown: u64,
+    original: PathBuf,
+    deferred: PathBuf,
 }
 impl IntegrityVerifier {
-    pub fn new(limit: Option<InstructionNumber>) -> IntegrityVerifier {
+    pub fn new(config: IntegrityConfig) -> IntegrityVerifier {
         IntegrityVerifier {
-            clause: ClauseIssues::new(),
-            chain: ChainIssues::new(),
-            witness: WitnessIssues::new(),
-            lits: LiteralSet::new(),
-            slots: IndexSet::new(),
-            marks: IndexSet::new(),
-            subchains: Vec::new(),
+            clause: ClauseBuffer::new(),
+            chain: ChainBuffer::new(),
+            witness: WitnessBuffer::new(),
+            mchain: MultichainBuffer::new(),
+            model: Model::new(),
+            idflags: ClauseIndexFlags::new(),
             subst: Substitution::new(),
-            loader: InstructionLoader::new(),
-            limit: limit.unwrap_or(InstructionNumber::new(InstructionNumberKind::Premise)),
+            insertions: None,
             stats: IntegrityStats::new(),
+            config: config,
+            countdown: u64::max_value(),
+            current: InstructionNumber::new_premise(),
+            original: PathBuf::from("(unknown)"),
+            deferred: PathBuf::from("(unknown)"),
         }
     }
-    pub fn check(mut self, mut cnf: TextAsrParser<'_>, mut asr: TextAsrParser<'_>) -> (IntegrityStats, Vec<InstructionNumber>) {
+    pub fn check(&mut self, mut cnf: TextAsrParser<'_>, mut asr: TextAsrParser<'_>) {
+        // Set the path to the CNF formula as the reference for error-reporting.
+        self.original = cnf.path().to_path_buf();
+        // Check the CNF formula.
         self.check_cnf(&mut cnf);
-        self.check_asr(&mut asr);
-        if self.stats.first_qed.is_none() {
-            self.stats.missing_qed(&asr.position());
+        // Make a new buffer.
+        let mut buffer = Vec::<u8>::new();
+        write!(&mut buffer, "p proof\n").unwrap_or_else(|e| panic!(format!("{}", e)));
+        // Set the path to the ASR proof as the reference for error-reporting...
+        self.original = asr.path().to_path_buf();
+        // ... and possibly use the 'p source' header as a deferred reference.
+        self.deferred = if let Some((_, src)) = asr.parse_source_header() {
+            src
+        } else {
+            PathBuf::from("(unknown)")
+        };
+        let count_header = asr.parse_count_header(!self.config.preprocessing);
+        if let Some((_, total)) = count_header {
+            self.countdown = self.config.lower(total);
         }
-        (self.stats, self.loader.extract())
+        // Check the ASR core, storing any delayed instructions in the buffer.
+        self.check_asr_core(&mut asr, &mut buffer);
+        // Temporarily set alternative paths for error-reporting.
+        let mut temp_path = PathBuf::from("(buffer)");
+        mem::swap(&mut self.original, &mut temp_path);
+        mem::swap(&mut self.deferred, &mut temp_path);
+        // Check the ASR proof fragment corresponding to the buffer.
+        let mut buffer_ps = TextAsrParser::new(InputReader::new(&buffer[..], &self.original, false));
+        self.check_asr_proof(&mut buffer_ps, true);
+        // Restore the alternative paths for error-reporting, and drop all structures related to buffering.
+        mem::swap(&mut self.deferred, &mut temp_path);
+        mem::swap(&mut self.original, &mut temp_path);
+        mem::drop(temp_path);
+        mem::drop(buffer_ps);
+        mem::drop(buffer);
+        // Check the rest of the ASR proof.
+        self.check_asr_proof(&mut asr, false);
+        if let None = self.stats.first_qed {
+            self.missing_qed(asr.position())
+        }
+        if let Some((pos, total)) = count_header {
+            if total != self.stats.num_cores + self.stats.num_instructions {
+                self.invalid_num_instructions(pos, total);
+            }
+        }
+    }
+    pub fn data(self) -> (IntegrityStats, Option<IntegrityData>) {
+        let data = if self.stats.first_qed.is_none() || (!self.config.preprocessing && self.insertions.is_none()) {
+            None
+        } else {
+            let (end, qed) = self.stats.first_qed.unwrap();
+            Some(IntegrityData {
+                insertions: self.insertions.unwrap_or_else(|| Vec::new()),
+                end: end,
+                qed: qed,
+            })
+        };
+        (self.stats, data)
     }
     fn check_cnf(&mut self, cnf: &mut TextAsrParser<'_>) {
+        self.current = InstructionNumber::new_premise();
         let (cnfpos, cnfvar, cnfcls) = cnf.parse_cnf_header();
         while let Some(pos) = cnf.parse_premise() {
-            self.stats.increase_premises();
-            self.check_clause(cnf.parse_clause(), &pos, InstructionNumberKind::Premise, None);
+            self.current.next();
+            self.check_clause(cnf.parse_clause(), Left(&pos));
+            self.stats.new_premise();
         }
-        if cnfvar < self.stats.max_variable {
-            self.stats.invalid_num_variables(&cnfpos, cnfvar);
+        if !self.stats.check_variables(cnfvar) {
+            self.invalid_num_variables(cnfpos, cnfvar);
         }
-        if cnfcls as u64 != self.stats.num_premises.number() {
-            self.stats.invalid_num_clauses(&cnfpos, cnfcls);
+        if !self.stats.check_clauses(cnfcls) {
+            self.invalid_num_clauses(cnfpos, cnfcls);
         }
         self.stats.record_cnf_time();
     }
-    fn check_asr(&mut self, asr: &mut TextAsrParser<'_>) {
+    fn check_asr_core(&mut self, asr: &mut TextAsrParser<'_>, buffer: &mut Vec<u8>) {
+        self.current = InstructionNumber::new_core();
         asr.parse_core_header();
-        while let Some((id, pos)) = asr.parse_core() {
-            self.stats.increase_cores();
-            self.check_instruction_number(asr, &pos, InstructionNumberKind::Core);
-            self.check_clause(asr.parse_clause(), &pos, InstructionNumberKind::Core, Some(id));
-            if self.slots.check_set(id) {
-                self.stats.conflict_id(&pos, InstructionNumberKind::Core, id);
-            }
-            if self.stats.num_cores < self.limit {
-                self.loader.insert(id, self.stats.num_cores);
+        while let Some(ins) = asr.parse_instruction(true, self.config.preprocessing) {
+            match ins.kind() {
+                PrepParsedInstructionKind::Core => self.check_asr_core_instruction(asr, &ins),
+                _ => self.save_instruction(asr, &ins, buffer),
             }
         }
+    }
+    fn check_asr_proof(&mut self, asr: &mut TextAsrParser<'_>, buffered: bool) {
+        self.current = if buffered { InstructionNumber::new_buffer() } else { InstructionNumber::new_proof() };
         asr.parse_proof_header();
-        while let Some((ins, pos)) = asr.parse_instruction() {
-            self.stats.max_clauseid = self.stats.max_clauseid | ins.id;
-            self.stats.increase_instructions();
-            match ins.kind {
-                AsrParsedInstructionKind::Rup => {
-                    self.stats.num_rup += 1u64;
-                    self.check_instruction_number(asr, &pos, InstructionNumberKind::Proof);
-                    self.check_clause(asr.parse_clause(), &pos, InstructionNumberKind::Proof, Some(ins.id));
-                    self.check_chain(asr.parse_chain(), &pos, ins.id, None);
-                    if self.slots.check_set(ins.id) {
-                        self.stats.conflict_id(&pos, InstructionNumberKind::Proof, ins.id);
-                    }
-                    if self.stats.num_instructions < self.limit {
-                        self.loader.insert(ins.id, self.stats.num_instructions);
-                    }
-                },
-                AsrParsedInstructionKind::Wsr => {
-                    self.stats.num_wsr += 1u64;
-                    self.check_instruction_number(asr, &pos, InstructionNumberKind::Proof);
-                    self.check_clause(asr.parse_clause(), &pos, InstructionNumberKind::Proof, Some(ins.id));
-                    self.check_substitution(asr.parse_witness(), &pos, ins.id);
-                    self.check_multichain(asr.parse_multichain(ins.id), &pos, ins.id);
-                    if self.slots.check_set(ins.id) {
-                        self.stats.conflict_id(&pos, InstructionNumberKind::Proof, ins.id);
-                    }
-                    if self.stats.num_instructions < self.limit {
-                        self.loader.insert(ins.id, self.stats.num_instructions);
-                    }
-                },
-                AsrParsedInstructionKind::Del => {
-                    self.stats.num_del += 1u64;
-                    if !self.slots.check_clear(ins.id) {
-                        self.stats.missing_deletion_id(&pos, ins.id);
-                    }
-                    if self.stats.num_instructions < self.limit {
-                        self.loader.remove(ins.id)
-                    }
-                },
-            }
-        }
-        self.stats.record_asr_time();
-    }
-    fn check_instruction_number(&mut self, asr: &mut TextAsrParser<'_>, pos: &FilePositionRef<'_>, section: InstructionNumberKind) {
-        if let Some(num) = asr.parse_instruction_number() {
-            if num.kind() != section {
-                self.stats.invalid_instruction_number(pos, section, num);
+        while let Some(ins) = asr.parse_instruction(false, true) {
+            match ins.kind() {
+                PrepParsedInstructionKind::Rup => self.check_asr_rup_instruction(asr, &ins),
+                PrepParsedInstructionKind::Del => self.check_asr_del_instruction(asr, &ins),
+                PrepParsedInstructionKind::Wsr => self.check_asr_wsr_instruction(asr, &ins),
+                _ => (),
             }
         }
     }
-    fn check_clause(&mut self, mut ps: TextClauseParser<'_, '_>, pos: &FilePositionRef<'_>, section: InstructionNumberKind, optid: Option<ClauseIndex>) {
+    fn check_asr_core_instruction(&mut self, asr: &mut TextAsrParser, ins: &PrepParsedInstruction) {
+        self.next_instruction();
+        let id = *ins.index();
+        self.stats.update_index(id);
+        if let Err(_) = self.idflags.insert(id, self.stats.num_cores + self.stats.num_instructions) {
+            self.conflicting_id(ins);
+        }
+        self.check_clause(asr.parse_clause(), Right(ins));
+        self.stats.new_core();
+    }
+    fn check_asr_rup_instruction(&mut self, asr: &mut TextAsrParser, ins: &PrepParsedInstruction) {
+        self.next_instruction();
+        let id = *ins.index();
+        self.stats.update_index(id);
+        if let Err(_) = self.idflags.insert(id, self.stats.num_cores + self.stats.num_instructions) {
+            self.conflicting_id(ins);
+        }
+        self.check_clause(asr.parse_clause(), Right(ins));
+        self.check_chain(asr.parse_chain(), ins, None);
+        self.stats.new_instruction();
+        self.stats.new_rup();
+    }
+    fn check_asr_wsr_instruction(&mut self, asr: &mut TextAsrParser, ins: &PrepParsedInstruction) {
+        self.next_instruction();
+        let id = *ins.index();
+        self.stats.update_index(id);
+        if let Err(_) = self.idflags.insert(id, self.stats.num_cores + self.stats.num_instructions) {
+            self.conflicting_id(ins);
+        }
+        self.check_clause(asr.parse_clause(), Right(ins));
+        self.check_witness(asr.parse_witness(), ins);
+        self.check_multichain(asr.parse_multichain(id), ins);
+        self.stats.new_instruction();
+        self.stats.new_wsr();
+    }
+    fn check_asr_del_instruction(&mut self, _: &mut TextAsrParser, ins: &PrepParsedInstruction) {
+        self.next_instruction();
+        let id = *ins.index();
+        self.stats.update_index(id);
+        if let Err(_) = self.idflags.remove(id) {
+            self.missing_deletion_id(ins);
+        }
+        self.stats.new_instruction();
+        self.stats.new_del();
+    }
+    fn check_clause(&mut self, mut ps: TextClauseParser<'_, '_>, data: Either<&FilePosition, &PrepParsedInstruction>) {
         while let Some(lit) = ps.next() {
-            self.stats.max_variable |= lit;
-            let repeated = self.lits.check_set(lit);
-            self.clause.add(lit, repeated);
+            self.stats.update_literal(lit);
+            self.clause.push(&mut self.model, lit);
+        }
+        if let (Right(ins), None) = (data, self.stats.first_qed) {
+            if self.clause.is_absurd() {
+                self.stats.first_qed = Some((self.current, *ins.index()));
+            }
         }
         if !self.clause.is_ok() {
-            self.stats.invalid_clause(pos, section, &self.clause, optid);
+            self.invalid_clause(data);
         }
-        if optid.is_some() && self.clause.is_qed() {
-            self.stats.record_qed(section);
-        }
-        self.clause.clear(&mut self.lits)
+        self.clause.clear(&mut self.model);
     }
-    fn check_substitution(&mut self, mut ps: TextWitnessParser<'_, '_>, pos: &FilePositionRef<'_>, id: ClauseIndex) {
+    fn check_witness(&mut self, mut ps: TextWitnessParser<'_, '_>, ins: &PrepParsedInstruction) {
         while let Some((var, lit)) = ps.next() {
-            self.stats.max_variable |= var;
-            self.stats.max_variable |= lit;
-            let ins = self.subst.insert(var, lit);
-            self.witness.add(var, lit, ins);
+            self.stats.update_variable(var);
+            self.stats.update_literal(lit);
+            self.witness.push(&mut self.subst, var, lit);
         }
         if !self.witness.is_ok() {
-            self.stats.invalid_witness(pos, &self.witness, id);
+            self.invalid_witness(ins);
         }
         self.witness.clear(&mut self.subst);
     }
-    fn check_chain(&mut self, mut ps: TextChainParser<'_, '_>, pos: &FilePositionRef<'_>, central: ClauseIndex, lateral: Option<ClauseIndex>) {
-        while let Some(cid) = ps.next() {
-            self.stats.max_clauseid = self.stats.max_clauseid | cid;
-            let missing = !self.slots.check(cid) || cid == central;
-            self.chain.add(cid, missing);
+    fn check_chain(&mut self, mut ps: TextChainParser<'_, '_>, ins: &PrepParsedInstruction, lat: Option<ClauseIndex>) {
+        self.chain.exclude(*ins.index());
+        while let Some(id) = ps.next() {
+            self.stats.update_index(id);
+            self.chain.push(&self.idflags, id);
         }
         if !self.chain.is_ok() {
-            self.stats.missing_id(pos, &self.chain, central, lateral)
+            self.missing_chain_id(lat, ins);
         }
         self.chain.clear();
     }
-    fn check_multichain(&mut self, mut ps: TextMultichainParser<'_, '_>, pos: &FilePositionRef<'_>, central: ClauseIndex) {
-        while let Some((lat, subps)) = ps.next() {
-            self.stats.max_clauseid = self.stats.max_clauseid | lat;
-            if !self.slots.check(lat) && lat != central {
-                self.stats.missing_id_subchain(pos, central, lat, subps.is_some());
-            } else if self.marks.check_set(lat) {
-                self.stats.repeated_id_subchain(pos, central, lat, subps.is_some());
+    fn check_multichain(&mut self, mut ps: TextMultichainParser<'_, '_>, ins: &PrepParsedInstruction) {
+        while let Some((lat, sub)) = ps.next() {
+            self.stats.update_index(lat);
+            if let Some(chain_ps) = sub {
+                self.mchain.push_dummy_chain(&mut self.idflags, lat);
+                self.check_chain(chain_ps, ins, Some(lat));
             } else {
-                self.subchains.push((lat, true));
-            }
-            if let Some(chps) = subps {
-                self.check_chain(chps, pos, central, Some(lat));
-            } else {
-                self.stats.num_del += 1u64;
-                self.subchains.push((lat, false));
+                self.mchain.push_deletion(&mut self.idflags, lat);
             }
         }
-        for &(lat, flag) in &self.subchains {
-            self.marks.clear(lat);
-            if !flag {
-                self.slots.clear(lat);
-            }
+        if !self.mchain.is_ok() {
+            self.invalid_lateral_id(ins);
         }
-        self.subchains.clear();
+        for &id in self.mchain.deletions() {
+            self.idflags.remove(id).unwrap();
+        }
+        self.mchain.clear(&mut self.idflags);
     }
-}
-
-
-pub struct ClauseIssues {
-    clause: Vec<Literal>,
-    repetitions: Vec<Literal>,
-    count: usize,
-}
-impl ClauseIssues {
-    fn new() -> ClauseIssues {
-        ClauseIssues {
-            clause: Vec::new(),
-            repetitions: Vec::new(),
-            count: 0usize,
-        }
-    }
-    fn add(&mut self, lit: Literal, repeated: bool) {
-        self.clause.push(lit);
-        if repeated {
-            self.repetitions.push(lit)
+    fn next_instruction(&mut self) {
+        self.current.next();
+        if self.countdown == 0u64 {
+            self.extract_instructions();
+            self.countdown = u64::max_value();
         } else {
-            self.count += 1usize;
+            self.countdown -= 1u64;
         }
     }
-    fn is_ok(&self) -> bool {
-        self.repetitions.is_empty()
+    fn extract_instructions(&mut self) {
+        let mut vec = self.idflags.instructions();
+        vec.sort();
+        vec.reverse();
+        self.insertions = Some(vec)
     }
-    fn is_qed(&self) -> bool {
-        self.count == 0usize || (self.count == 1usize && unsafe { self.clause.get_unchecked(0usize) } == &Literal::Bottom)
-    }
-    fn clear(&mut self, lits: &mut LiteralSet) {
-        for &lit in &self.clause {
-            lits.clear(lit);
-        }
-        self.clause.clear();
-        self.repetitions.clear();
-        self.count = 0usize;
-    }
-}
-
-pub struct ChainIssues {
-    chain: Vec<ClauseIndex>,
-    missing: Vec<ClauseIndex>,
-}
-impl ChainIssues {
-    fn new() -> ChainIssues {
-        ChainIssues {
-            chain: Vec::new(),
-            missing: Vec::new(),
+    fn save_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction, buffer: &mut Vec<u8>) {
+        let res = match ins.kind() {
+            PrepParsedInstructionKind::Core => asr.save_core_instruction(*ins.index(), ins.default_position(), buffer),
+            PrepParsedInstructionKind::Rup => asr.save_rup_instruction(*ins.index(), ins.default_position(), buffer),
+            PrepParsedInstructionKind::Del => asr.save_del_instruction(*ins.index(), ins.default_position(), buffer),
+            PrepParsedInstructionKind::Wsr => asr.save_wsr_instruction(*ins.index(), ins.default_position(), buffer),
+        };
+        if let Err(e) = res {
+            panic!(format!("{}", e))
         }
     }
-    fn add(&mut self, id: ClauseIndex, missing: bool) {
-        self.chain.push(id);
-        if missing {
-            self.missing.push(id)
-        }
+    fn invalid_num_variables(&mut self, pos: FilePosition, vars: u32) {
+        self.stats.log_error(IntegrityError::InvalidNumberOfVariables(pos.with_path(&self.original), vars, self.stats.max_var.get()));
     }
-    fn is_ok(&self) -> bool {
-        self.missing.is_empty()
+    fn invalid_num_clauses(&mut self, pos: FilePosition, cls: u64) {
+        self.stats.log_error(IntegrityError::InvalidNumberOfClauses(pos.with_path(&self.original), cls, self.stats.num_premises));
     }
-    fn clear(&mut self) {
-        self.chain.clear();
-        self.missing.clear();
+    fn invalid_num_instructions(&mut self, pos: FilePosition, num: u64) {
+        self.stats.log_error(IntegrityError::InvalidNumberOfInstructions(pos.with_path(&self.original), num, self.stats.num_cores + self.stats.num_instructions));
     }
-}
-
-pub struct WitnessIssues {
-    witness: Vec<(Variable, Literal)>,
-    repeated: Vec<(Variable, Literal)>,
-    conflict: Vec<(Variable, Vec<Literal>)>,
-}
-impl WitnessIssues {
-    fn new() -> WitnessIssues {
-        WitnessIssues {
-            witness: Vec::new(),
-            repeated: Vec::new(),
-            conflict: Vec::new(),
-        }
+    fn invalid_clause(&mut self, data: Either<&FilePosition, &PrepParsedInstruction>) {
+        let (clause, reps, confs) = self.clause.extract();
+        let pos = data.either(|pos| pos.with_path(&self.original).deferred(), |ins| ins.position(&self.original, &self.deferred));
+        let id = data.either(|_| None, |ins| Some(*ins.index()));
+        self.stats.log_error(IntegrityError::InvalidClause(pos, id, self.current, clause, reps, confs));
     }
-    fn add(&mut self, var: Variable, lit: Literal, ins: SubstitutionInsertion) {
-        self.witness.push((var, lit));
-        match ins {
-            SubstitutionInsertion::Repeated => self.insert_repeated(var, lit),
-            SubstitutionInsertion::Inconsistent => self.insert_inconsistent(var, lit),
-            _ => (),
-        }
+    fn invalid_witness(&mut self, ins: &PrepParsedInstruction) {
+        let (witness, reps, confs) = self.witness.extract();
+        let pos = ins.position(&self.original, &self.deferred);
+        self.stats.log_error(IntegrityError::InvalidWitness(pos, *ins.index(), self.current, witness, reps, confs));
     }
-    fn insert_repeated(&mut self, var: Variable, lit: Literal) {
-        if self.repeated.iter().find(|&&(v, _)| v == var).is_none() {
-            self.repeated.push((var, lit));
-        }
+    fn conflicting_id(&mut self, ins: &PrepParsedInstruction) {
+        let pos = ins.position(&self.original, &self.deferred);
+        self.stats.log_error(IntegrityError::ConflictingId(pos, *ins.index(), self.current));
     }
-    fn insert_inconsistent(&mut self, var: Variable, lit: Literal) {
-        match self.conflict.iter_mut().find(|&&mut (v, _)| v == var) {
-            Some((_, vec)) => vec.push(lit),
-            None => {
-                let (_, l) = self.witness.iter().find(|&&(v, _)| v == var).unwrap();
-                self.conflict.push((var, vec![*l, lit]));
-            },
-        }
+    fn missing_chain_id(&mut self, lat_id: Option<ClauseIndex>, ins: &PrepParsedInstruction) {
+        let (chain, missing) = self.chain.extract();
+        let pos = ins.position(&self.original, &self.deferred);
+        self.stats.log_error(IntegrityError::ChainMissingId(pos, *ins.index(), self.current, lat_id, chain, missing));
     }
-    fn is_ok(&self) -> bool {
-        self.repeated.is_empty() && self.conflict.is_empty()
+    fn invalid_lateral_id(&mut self, ins: &PrepParsedInstruction) {
+        let (laterals, miss_chain, miss_del, reps) = self.mchain.extract();
+        let pos = ins.position(&self.original, &self.deferred);
+        self.stats.log_error(IntegrityError::InvalidLateralId(pos, *ins.index(), self.current, laterals, miss_chain, miss_del, reps));
     }
-    fn clear(&mut self, subst: &mut Substitution) {
-        subst.clear();
-        self.witness.clear();
-        self.repeated.clear();
-        self.conflict.clear();
+    fn missing_deletion_id(&mut self, ins: &PrepParsedInstruction) {
+        let pos = ins.position(&self.original, &self.deferred);
+        self.stats.log_error(IntegrityError::MissingDeletionId(pos, *ins.index(), self.current));
     }
-}
-
-#[cfg(test)]
-pub mod test {
-    use std::{
-        fs::{File},
-        path::{Path},
-        convert::{TryFrom},
-    };
-    use crate::{
-        textparser::{TextAsrParser},
-        io::{InputReader, MainOutput, MutedOutput},
-        integrity::{IntegrityVerifier, IntegrityError, EqFilePosition, IntegritySection},
-        basic::{Variable, Literal, MaybeVariable, ClauseIndex},
-    };
-
-
-    fn test_integrity_file(cnf: &Path, asr: &Path, err: Vec<IntegrityError>) {
-        let cnf_parser = TextAsrParser::new(InputReader::new(File::open(cnf).unwrap(), cnf, false));
-        let asr_parser = TextAsrParser::new(InputReader::new(File::open(asr).unwrap(), asr, false));
-        let intg = IntegrityVerifier::new();
-        assert!(intg.check(cnf_parser, asr_parser).errors == err);
-    }
-
-    #[test]
-    fn test_integrity() {
-        MutedOutput.lock().unwrap().mute();
-        test_integrity_file(Path::new("test/integrity/integrity.cnf"), Path::new("test/integrity/integrity.asr"),
-            vec![]);
-        test_integrity_file(Path::new("test/integrity/no_variables.cnf"), Path::new("test/integrity/integrity.asr"),
-            vec![IntegrityError::InvalidNumberOfVariables(
-                EqFilePosition::dummy(),
-                MaybeVariable::try_from(19i64).unwrap(),
-                MaybeVariable::try_from(20i64).unwrap())]);
-        test_integrity_file(Path::new("test/integrity/no_clauses.cnf"), Path::new("test/integrity/integrity.asr"),
-            vec![IntegrityError::InvalidNumberOfClauses(
-                EqFilePosition::dummy(),
-                46u64,
-                45u64)]);
-        test_integrity_file(Path::new("test/integrity/invalid.cnf"), Path::new("test/integrity/invalid.asr"),
-            vec![IntegrityError::InvalidClause(
-                EqFilePosition::dummy(),
-                None,
-                IntegritySection::Premise,
-                46u64,
-                vec![Literal::try_from(1i64).unwrap(), Literal::try_from(1i64).unwrap()],
-                vec![Literal::try_from(1i64).unwrap()]),
-            IntegrityError::InvalidClause(
-                EqFilePosition::dummy(),
-                Some(ClauseIndex::try_from(100i64).unwrap()),
-                IntegritySection::Core,
-                46u64,
-                vec![Literal::try_from(1i64).unwrap(), Literal::try_from(2i64).unwrap(),
-                    Literal::try_from(-3i64).unwrap(), Literal::try_from(-2i64).unwrap(),
-                    Literal::try_from(-3i64).unwrap(), Literal::try_from(-4i64).unwrap(),
-                    Literal::try_from(1i64).unwrap()],
-                vec![Literal::try_from(-3i64).unwrap(), Literal::try_from(1i64).unwrap()]),
-            IntegrityError::InvalidClause(
-                EqFilePosition::dummy(),
-                Some(ClauseIndex::try_from(101i64).unwrap()),
-                IntegritySection::Proof,
-                2u64,
-                vec![Literal::try_from(1i64).unwrap(), Literal::try_from(2i64).unwrap(),
-                    Literal::try_from(-3i64).unwrap(), Literal::try_from(-2i64).unwrap(),
-                    Literal::try_from(-3i64).unwrap(), Literal::try_from(-4i64).unwrap()],
-                vec![Literal::try_from(-3i64).unwrap()]),
-            IntegrityError::InvalidWitness(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(101i64).unwrap(),
-                IntegritySection::Proof,
-                2u64,
-                vec![(Variable::try_from(4i64).unwrap(), Literal::try_from(5i64).unwrap()),
-                    (Variable::try_from(4i64).unwrap(), Literal::try_from(5i64).unwrap()),
-                    (Variable::try_from(9i64).unwrap(), Literal::try_from(10i64).unwrap()),
-                    (Variable::try_from(10i64).unwrap(), Literal::try_from(-9i64).unwrap()),
-                    (Variable::try_from(14i64).unwrap(), Literal::Top),
-                    (Variable::try_from(14i64).unwrap(), Literal::Bottom),
-                    (Variable::try_from(19i64).unwrap(), Literal::try_from(20i64).unwrap()),
-                    (Variable::try_from(20i64).unwrap(), Literal::try_from(19i64).unwrap())],
-                vec![(Variable::try_from(4i64).unwrap(), Literal::try_from(5i64).unwrap())],
-                vec![(Variable::try_from(14i64).unwrap(), vec![Literal::Top, Literal::Bottom])])]);
-        test_integrity_file(Path::new("test/integrity/integrity.cnf"), Path::new("test/integrity/id_conflict.asr"),
-            vec![IntegrityError::ConflictingId(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(45i64).unwrap(),
-                IntegritySection::Core,
-                46u64),
-            IntegrityError::ConflictingId(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(49i64).unwrap(),
-                IntegritySection::Proof,
-                5u64),
-            IntegrityError::ConflictingId(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(52i64).unwrap(),
-                IntegritySection::Proof,
-                9u64)]);
-        test_integrity_file(Path::new("test/integrity/integrity.cnf"), Path::new("test/integrity/missing.asr"),
-            vec![IntegrityError::ChainMissingId(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(46i64).unwrap(),
-                IntegritySection::Proof,
-                1u64,
-                Some(ClauseIndex::try_from(30i64).unwrap()),
-                vec![ClauseIndex::try_from(6i64).unwrap(), ClauseIndex::try_from(100i64).unwrap()],
-                vec![ClauseIndex::try_from(100i64).unwrap()]),
-            IntegrityError::ChainMissingId(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(50i64).unwrap(),
-                IntegritySection::Proof,
-                5u64,
-                None,
-                vec![ClauseIndex::try_from(46i64).unwrap(), ClauseIndex::try_from(100i64).unwrap(),
-                    ClauseIndex::try_from(1i64).unwrap(), ClauseIndex::try_from(200i64).unwrap()],
-                vec![ClauseIndex::try_from(100i64).unwrap(), ClauseIndex::try_from(200i64).unwrap()]),
-            IntegrityError::MissingIdSubchain(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(53i64).unwrap(),
-                IntegritySection::Proof,
-                12u64,
-                ClauseIndex::try_from(100i64).unwrap(),
-                true),
-            IntegrityError::MissingIdSubchain(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(53i64).unwrap(),
-                IntegritySection::Proof,
-                12u64,
-                ClauseIndex::try_from(200i64).unwrap(),
-                false),
-            IntegrityError::RepeatedIdSubchain(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(53i64).unwrap(),
-                IntegritySection::Proof,
-                12u64,
-                ClauseIndex::try_from(10i64).unwrap(),
-                true),
-            IntegrityError::RepeatedIdSubchain(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(55i64).unwrap(),
-                IntegritySection::Proof,
-                14u64,
-                ClauseIndex::try_from(35i64).unwrap(),
-                false),
-            IntegrityError::MissingDeletionId(
-                EqFilePosition::dummy(),
-                ClauseIndex::try_from(49i64).unwrap(),
-                IntegritySection::Proof,
-                17u64),
-            IntegrityError::MissingQed(EqFilePosition::dummy())]);
+    fn missing_qed(&mut self, pos: FilePosition) {
+        self.stats.log_error(IntegrityError::MissingQed(pos.with_path(&self.original)));
     }
 }

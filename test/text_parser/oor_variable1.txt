@@ -12,8 +12,8 @@ p cnf c another comment
 50 80 -16 c yet another comment
 32 2147483647 -2147483647 0
 180 20 -1 0
-0 p core k 1 42 -31 f 0 k 38 t 18 -1 0 p  
-proof r 23 1 8 -3 -0 1 2 3 0 w 4294967295 2147483648 -11 22 -22 17 f 23 t 0
-1 2 3 0 32 64 128 256 0 58 d 0
+0 p source "Unicode \"test\"\n\t\\\u{004C}\u{20CF}\u{292A}\u{1F780}\u{1F600}" p core k 1 42 -31 f 0 k 38 l 5 t 18 -1 0 p  
+proof r 23 1 8 -3 -0 1 2 3 0 w 4294967295 l 1996 2147483648 -11 22 -22 17 f 23 t 0
+1 2 3 0 32 64 128 256 0 58 d 0 p count 4096
 d 18 d c and another one d 23
 23 d 19

@@ -5,118 +5,141 @@ use std::{
     sync::{Mutex},
 };
 
-/// A clonable file position structure. For binary files, this structure represent a byte position. For text files, it represents a line number.
-#[derive(Debug, Clone)]
-pub struct FilePositionRef<'a> {
-    /// Reference to the file path.
-    path: &'a Path,
+#[derive(Copy, Clone)]
+pub struct FilePosition {
     /// The first LSB marks whether this file is binary.
     /// The second LSB marks whether EOF has been reached.
     /// The rest of the integer is the line number, in the case of a text file, or the byte, in the case of a binary file.
-	offset: u64,
+    val: u64
 }
-impl<'a> FilePositionRef<'a> {
-    /// Creates a new `FilePositionRef` in starting position.
-    pub fn new<'b: 'a>(path: &'b Path, binary: bool) -> FilePositionRef<'a> {
-        FilePositionRef::<'a> {
-            path: path,
-            offset: if binary {
-                0b000u64
-            } else {
-                0b101u64
-            },
-        }
+impl FilePosition {
+    #[inline(always)]
+    pub fn new(binary: bool) -> FilePosition {
+        FilePosition { val: if binary { 0b000u64 } else { 0b101u64 } }
     }
-    /// Checks if the contents should be updated upon advancing the cursor.
     #[inline(always)]
     fn advance(&mut self, c: u8) {
         if self.binary() || c == b'\n' {
-            self.offset += 4u64
+            self.val += 4u64
         }
     }
     /// Sets a flag that EOF has been reached.
     #[inline(always)]
     fn finish(&mut self) {
-        self.offset |= 0b10u64
+        self.val |= 0b10u64
     }
     /// Checks if the file is binary.
     #[inline(always)]
     pub fn binary(&self) -> bool {
-        self.offset & 0b01u64 == 0u64
+        self.val & 0b01u64 == 0u64
     }
     /// Checks if EOF has been reached.
     #[inline(always)]
     pub fn finished(&self) -> bool {
-        self.offset & 0b10u64 != 0u64
+        self.val & 0b10u64 != 0u64
     }
     /// Returns the current offset, or `None` if EOF has been reached.
     pub fn offset(&self) -> Option<u64> {
         if self.finished() {
             None
         } else {
-            Some(self.offset >> 2)
+            Some(self.val >> 2)
         }
     }
-    /// Makes an owned copy of this position.
-    pub fn position(&self) -> FilePosition {
-        FilePosition {
-            path: PathBuf::from(self.path),
-            offset: self.offset,
+    pub fn text(&self) -> FilePositionText<'_> {
+        FilePositionText(self)
+    }
+    pub fn with_path(self, path: &Path) -> PathFilePosition {
+        PathFilePosition {
+            path: path.to_path_buf(),
+            offset: self,
         }
     }
 }
-impl<'a> Display for FilePositionRef<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-		if self.finished() {
-			write!(f, "{}: EOF", self.path.to_str().unwrap())
-		} else if self.binary() {
-			write!(f, "{}: byte {}", self.path.to_str().unwrap(), self.offset >> 2)
-		} else {
-			write!(f, "{}: line {}", self.path.to_str().unwrap(), self.offset >> 2)
-		}
-    }
-}
-
-/// The owned version of `FilePositionRef`, useful when it should outlive the path reference.
-pub struct FilePosition {
-    /// Copy of the file path.
-    path: PathBuf,
-    /// The first LSB marks whether this file is binary.
-    /// The second LSB marks whether EOF has been reached.
-    /// The rest of the integer is the line number, in the case of a text file, or the byte, in the case of a binary file.
-    offset: u64,
-}
-impl FilePosition {
-    pub fn new(path: &Path, binary: bool) -> FilePosition {
-        let mut buf = PathBuf::new();
-        buf.push(path);
-        FilePosition {
-            path: buf,
-            offset: if binary {
-                0b000u64
-            } else {
-                0b101u64
-            },
-        }
-    }
-    /// Checks if the file is binary.
-    fn binary(&self) -> bool {
-        self.offset & 0b01u64 == 0u64
-    }
-    /// Checks if EOF has been reached.
-    fn finished(&self) -> bool {
-        self.offset & 0b10u64 != 0u64
+impl From<i64> for FilePosition {
+    fn from(num: i64) -> FilePosition {
+        FilePosition { val: num as u64 }
     }
 }
 impl Display for FilePosition {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
 		if self.finished() {
-			write!(f, "{}: EOF", self.path.to_str().unwrap())
-		} else if self.binary() {
-			write!(f, "{}: byte {}", self.path.to_str().unwrap(), self.offset >> 2)
-		} else {
-			write!(f, "{}: line {}", self.path.to_str().unwrap(), self.offset >> 2)
-		}
+			write!(f, "EOF")
+        } else {
+            let word = if self.binary() { "byte" } else { "line" };
+            write!(f, "{} {}", word, self.val >> 2)
+        }
+    }
+}
+
+pub struct FilePositionText<'a>(&'a FilePosition);
+impl<'a> Display for FilePositionText<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}", self.0.val)
+    }
+}
+
+pub struct PathFilePosition {
+    path: PathBuf,
+    offset: FilePosition
+}
+impl PathFilePosition {
+    pub fn new(path: &Path, binary: bool) -> PathFilePosition {
+        PathFilePosition {
+            path: path.to_path_buf(),
+            offset: FilePosition::new(binary),
+        }
+    }
+    pub fn path(&self) -> &Path {
+        self.path.as_path()
+    }
+    pub fn offset(&self) -> FilePosition {
+        self.offset
+    }
+    #[inline(always)]
+    fn advance(&mut self, c: u8) {
+        self.offset.advance(c)
+    }
+    /// Sets a flag that EOF has been reached.
+    #[inline(always)]
+    pub fn finish(&mut self) {
+        self.offset.finish()
+    }
+    /// Checks if the file is binary.
+    #[inline(always)]
+    pub fn binary(&self) -> bool {
+        self.offset.binary()
+    }
+    /// Checks if EOF has been reached.
+    #[inline(always)]
+    pub fn finished(&self) -> bool {
+        self.offset.finished()
+    }
+    pub fn deferred(self) -> DeferredPosition {
+        DeferredPosition(self, None)
+    }
+}
+impl Display for PathFilePosition {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}: {}", self.path.display(), self.offset)
+    }
+}
+
+pub struct DeferredPosition(PathFilePosition, Option<PathFilePosition>);
+impl DeferredPosition {
+    pub fn with_paths(ofp: FilePosition, dfp: Option<FilePosition>, opath: &Path, dpath: &Path) -> DeferredPosition {
+        let opfp = ofp.with_path(opath);
+        let dpfp = dfp.map(|fp| fp.with_path(dpath));
+        DeferredPosition(opfp, dpfp)
+    }
+}
+impl Display for DeferredPosition {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}", &self.0)?;
+        if let Some(pfp) = &self.1 {
+            write!(f, " (originally from {})", pfp)?;
+        }
+        Ok(())
     }
 }
 
@@ -125,22 +148,26 @@ pub struct InputReader<'a> {
     /// Iterator over the reader stream.
     it: Box<dyn 'a + Iterator<Item = u8>>,
     /// File position of the last read item.
-	pos: FilePositionRef<'a>,
+	pos: PathFilePosition,
 }
 impl<'a> InputReader<'a> {
     /// Creates a new instance from a reader.
-    pub fn new<'b: 'a, 'c: 'a, R>(reader: R, path: &'b Path, binary: bool) -> InputReader<'a> where
+    pub fn new<'b: 'a, 'c: 'a, R>(reader: R, path: &Path, binary: bool) -> InputReader<'a> where
         R: 'c + Read
     {
         let it = BufReader::new(reader).bytes();
 		InputReader::<'a> {
 			it: Box::new(it.map(|x| x.unwrap_or_else(|err| panic!(format!("{}", err)))).fuse()),
-			pos: FilePositionRef::<'a>::new(path, binary),
+			pos: PathFilePosition::new(path, binary),
 		}
     }
+    #[inline(always)]
+    pub fn path(&self) -> &Path {
+        self.pos.path()
+    }
     /// Returns a copy of the current file position.
-	pub fn position(&self) -> FilePositionRef<'a> {
-		self.pos.clone()
+	pub fn position(&self) -> FilePosition {
+		self.pos.offset()
     }
     /// Checks if the file is binary.
     pub fn binary(&self) -> bool {
@@ -373,7 +400,7 @@ macro_rules! panick {
         create_message!(panick @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(panick @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+        create_message!(panick @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
     };
 }
 
@@ -383,7 +410,7 @@ macro_rules! fatal {
         create_message!(fatal @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(fatal @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+        create_message!(fatal @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
     };
 }
 
@@ -393,7 +420,7 @@ macro_rules! error {
         create_message!(error @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(error @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+        create_message!(error @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
     };
 }
 
@@ -403,7 +430,7 @@ macro_rules! warning {
         create_message!(warning @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(warning @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+        create_message!(warning @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
     };
 }
 
@@ -413,7 +440,7 @@ macro_rules! info {
         create_message!(info @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(info @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+        create_message!(info @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
     };
 }
 
@@ -423,7 +450,7 @@ macro_rules! success {
         create_message!(success @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(success @ $title, Option::<&$crate::io::FilePositionRef>::None, $lock, $block)
+        create_message!(success @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
     };
 }
 

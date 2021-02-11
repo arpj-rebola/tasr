@@ -1,144 +1,186 @@
+use std::{
+    mem::{self},
+    io::{Write, Result as IoResult},
+};
+
 use crate::{
-    textparser::{TextAsrParser, AsrParsedInstructionKind},
-    database::{Database},
-    clause::{ClauseDatabase, ClauseAddress},
-    chain::{ChainDatabase, MultichainBuffer},
-    formula::{Formula},
-    proof::{Proof, ProofIterator, CoreIterator},
-    mapping::{IndexSet},
+    checkerdb::{CheckerDb, ClauseAddress, ChainAddress, WitnessAddress},
+    buffer::{UncheckedChainBuffer, UncheckedClauseBuffer, UncheckedMultichainBuffer, UncheckedWitnessBuffer},
+    idflags::{ClauseIndexFlags},
     basic::{ClauseIndex},
-    split::{PreprocessingStats, SplittingData},
+    proof::{ForwardsProof},
+    split::{SplitterData, PreprocessingStats},
+    io::{FilePosition},
+    textparser::{PrepParsedInstructionKind, PrepParsedInstruction, TextAsrParser, TextChainParser, TextClauseParser, TextWitnessParser},
 };
 
 pub struct Trimmer {
-    database: Database,
-    clausedb: ClauseDatabase,
-    chaindb: ChainDatabase,
-    formula: Formula,
-    marks: IndexSet,
-    proof: Proof,
-    buffer: MultichainBuffer,
-    removals: Vec<ClauseAddress>,
-    deletions: Vec<ClauseIndex>,
+    db: CheckerDb,
+    clause: UncheckedClauseBuffer,
+    chain: UncheckedChainBuffer,
+    witness: UncheckedWitnessBuffer,
+    mchain: UncheckedMultichainBuffer,
+    idflags: ClauseIndexFlags<(FilePosition, ClauseAddress)>,
+    dels: Vec<ClauseIndex>,
+    proof: ForwardsProof,
     stats: PreprocessingStats,
 }
 impl Trimmer {
-    pub fn new(data: SplittingData) -> Trimmer {
-        let mut marks = IndexSet::new();
-        marks.set(data.qed);
-        println!("marking {}", data.qed);
+    pub fn new(data: SplitterData) -> Trimmer {
+        let mut idflags = ClauseIndexFlags::new();
+        for (id, addr, pos) in data.result {
+            idflags.insert(id, (pos, addr)).unwrap();
+        }
+        idflags.flags_mut(data.qed).unwrap().set_check_schedule();
         Trimmer {
-            database: data.database,
-            clausedb: ClauseDatabase,
-            chaindb: ChainDatabase,
-            formula: data.formula,
-            marks: marks,
-            proof: Proof::new(),
-            buffer: MultichainBuffer::new(),
-            removals: Vec::new(),
-            deletions: Vec::new(),
+            db: data.db,
+            clause: UncheckedClauseBuffer::new(),
+            chain: UncheckedChainBuffer::new(),
+            witness: UncheckedWitnessBuffer::new(),
+            mchain: UncheckedMultichainBuffer::new(),
+            idflags: idflags,
+            dels: Vec::new(),
+            proof: ForwardsProof::new(),
             stats: data.stats,
         }
     }
-    pub fn trim_fragment(&mut self, mut ps: TextAsrParser<'_>) -> ProofIterator<'_> {
-        while let Some((ins, _)) = ps.parse_instruction() {
-            match ins.kind {
-                AsrParsedInstructionKind::Rup => self.process_rup(&mut ps, ins.id),
-                AsrParsedInstructionKind::Wsr => self.process_wsr(&mut ps, ins.id),
-                AsrParsedInstructionKind::Del => self.process_del(&mut ps, ins.id),
+    pub fn process(&mut self, mut asr: TextAsrParser<'_>) -> TrimmedFragment<'_> {
+        while let Some(ins) = asr.parse_instruction(false, true) {
+            match ins.kind() {
+                PrepParsedInstructionKind::Rup => self.process_rup_instruction(&mut asr, &ins),
+                PrepParsedInstructionKind::Del => self.process_del_instruction(&mut asr, &ins),
+                PrepParsedInstructionKind::Wsr => self.process_wsr_instruction(&mut asr, &ins),
+                _ => (),
             }
         }
-        self.proof.extract(&mut self.database, &mut self.removals)
+        TrimmedFragment::<'_> {
+            db: &mut self.db,
+            proof: &mut self.proof,
+        }
     }
-    pub fn core<'a, 'b: 'a>(&'b mut self) -> CoreIterator<'a> {
-        let iter = self.formula.into_iter();
-        CoreIterator::new(iter, &self.database, &self.marks, &mut self.stats.num_cores)
-    }
-    pub fn extract(mut self) -> PreprocessingStats {
-        self.stats.record_trimming_time();
+    pub fn core<W: Write>(mut self, wt: &mut W) -> PreprocessingStats {
+        self.process_cores(wt).unwrap_or_else(|e| panic!(format!("{}", e)));
+        self.stats.record_trim_time();
         self.stats
     }
-    fn process_rup(&mut self, ps: &mut TextAsrParser<'_>, id: ClauseIndex) {
-        println!("processing a RUP {}", id);
-        let (num, clause) = self.formula.remove(id).unwrap();
-        let mut chain_ps = ps.parse_chain();
-        if self.marks.check_clear(id) {
-            println!("clearing {}", id);
-            self.stats.num_intros += 1u64;
-            let mut chain_wt = self.chaindb.open_chain(&mut self.database, None);
-            while let Some(cid) = chain_ps.next() {
-                chain_wt.write(cid);
-                if !self.marks.check_set(cid) {
-                    println!("marking {}", cid);
-                    self.proof.insert_del(cid);
-                    self.stats.num_instructions += 1u64;
-                    self.stats.num_dels += 1u64;
-                }
-            }
-            let chain = chain_wt.close();
-            self.proof.insert_rup(id, num, clause, chain);
-            self.stats.num_instructions += 1u64;
+    fn process_rup_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+        let id = *ins.index();
+        let ((pos, clause_addr), flags) = self.idflags.take(id).unwrap();
+        if flags.has_check_schedule() {
+            let chain_addr = self.process_chain(asr.parse_chain());
+            self.process_explicit_deletions(pos);
+            self.proof.insert_rup(id, pos, clause_addr, chain_addr);
+            self.stats.new_inference();
         } else {
-            self.removals.push(clause);
+            self.db.deallocate_clause(clause_addr);
+            mem::drop(asr.parse_chain());
         }
     }
-    fn process_wsr(&mut self, ps: &mut TextAsrParser<'_>, id: ClauseIndex) {
-        println!("processing a WSR {}", id);
-        let (num, clause) = self.formula.remove(id).unwrap();
-        if self.marks.check_clear(id) {
-            println!("clearing {}", id);
-            self.stats.num_intros += 1u64;
-            let mut witness_wt = self.chaindb.open_multichain(&mut self.database, None, &mut self.buffer);
-            {
-                let mut witness_ps = ps.parse_witness();
-                while let Some((var, lit)) = witness_ps.next() {
-                    witness_wt.write(var, lit);
+    fn process_wsr_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+        let id = *ins.index();
+        if self.idflags.flags(id).unwrap().has_check_schedule() {
+            let witness_addr = self.process_witness(asr.parse_witness());
+            self.mchain.set_witness(witness_addr);
+            let mut mchain_ps = asr.parse_multichain(id);
+            while let Some((lid, Some(chain_ps))) = mchain_ps.next() {
+                if self.idflags.flags_mut(lid).unwrap().has_check_schedule() {
+                    let chain_addr = self.process_chain(chain_ps);
+                    self.mchain.push_chain(lid, chain_addr);
                 }
             }
-            let mut multichain_ps = ps.parse_multichain(id);
-            {
-                let mut multichain_wt = witness_wt.multichain();
-                while let Some((lid, subchain_ps)) = multichain_ps.next() {
-                    if self.marks.check(lid) || lid == id {
-                        if let Some(mut chain_ps) = subchain_ps {
-                            let mut chain_wt = multichain_wt.proper_chain(lid);
-                            while let Some(cid) = chain_ps.next() {
-                                chain_wt.write(cid);
-                                if !self.marks.check(cid) {
-                                    self.deletions.push(cid);
-                                }
-                            }
-                            chain_wt.close();
-                        }
-                    }
-                }
-                self.deletions.sort();
-                self.deletions.dedup();
-                self.stats.num_dels += self.deletions.len() as u64;
-                for &lid in &self.deletions {
-                    self.marks.set(lid);
-                    multichain_wt.deleted_chain(lid, &self.formula);
-                }
-                self.deletions.clear();
-                let (mchain, _) = multichain_wt.close();
-                self.proof.insert_wsr(id, num, clause, mchain);
-                self.stats.num_instructions += 1u64;
-            }
+
+            self.process_implicit_deletions();
+            let mchain_addr = self.db.allocate_multichain(self.mchain.get());
+            self.mchain.clear();
+            let ((pos, clause_addr), _) = self.idflags.take(id).unwrap();
+            self.proof.insert_wsr(id, pos, clause_addr, mchain_addr);
+            self.stats.new_inference();
         } else {
-            ps.parse_witness();
-            ps.parse_multichain(id);
-            self.removals.push(clause);
+            let ((_, clause_addr), _) = self.idflags.take(id).unwrap();
+            self.db.deallocate_clause(clause_addr);
+            mem::drop(asr.parse_witness());
+            mem::drop(asr.parse_multichain(id));
         }
     }
-    fn process_del(&mut self, ps: &mut TextAsrParser<'_>, id: ClauseIndex) {
-        println!("processing a DEL {}", id);
-        let num = ps.parse_instruction_number().unwrap();
-        let mut clause_ps = ps.parse_clause();
-        let mut clause_wt = self.clausedb.open(&mut self.database);
-        while let Some(lit) = clause_ps.next() {
-            clause_wt.write(lit);
+    fn process_del_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+        let id = ins.index();
+        let clause_addr = self.process_clause(asr.parse_clause());
+        let pos = ins.default_position();
+        self.idflags.insert(*id, (pos, clause_addr)).unwrap();
+    }
+    fn process_clause(&mut self, mut ps: TextClauseParser<'_, '_>) -> ClauseAddress {
+        while let Some(lit) = ps.next() {
+            self.clause.push(lit);
         }
-        let addr = clause_wt.close();
-        self.formula.insert(id, num, addr);
+        let addr = self.db.allocate_clause(self.clause.get());
+        self.clause.clear();
+        addr
+    }
+    fn process_chain(&mut self, mut ps: TextChainParser<'_, '_>) -> ChainAddress {
+        while let Some(cid) = ps.next() {
+            self.chain.push(cid);
+            if !self.idflags.flags_mut(cid).unwrap().has_check_schedule() {
+                self.dels.push(cid);
+            }
+        }
+        let addr = self.db.allocate_chain(self.chain.get());
+        self.chain.clear();
+        addr
+    }
+    fn process_witness(&mut self, mut ps: TextWitnessParser<'_, '_>) -> WitnessAddress {
+        while let Some((var, lit)) = ps.next() {
+            self.witness.push(var, lit);
+        }
+        let addr = self.db.allocate_witness(self.witness.get());
+        self.witness.clear();
+        addr
+    }
+    fn process_explicit_deletions(&mut self, pos: FilePosition) {
+        self.dels.sort();
+        self.dels.dedup();
+        for &did in &self.dels {
+            self.idflags.flags_mut(did).unwrap().set_check_schedule();
+            self.proof.insert_del(did, pos);
+            self.stats.new_deletion_instruction();
+        }
+        self.dels.clear();
+    }
+    fn process_implicit_deletions(&mut self) {
+        self.dels.sort();
+        self.dels.dedup();
+        for &did in &self.dels {
+            self.idflags.flags_mut(did).unwrap().set_check_schedule();
+            self.mchain.push_deletion(did);
+            self.stats.new_implicit_deletion();
+        }
+        self.dels.clear();
+    }
+    fn process_cores<W: Write>(&mut self, wt: &mut W) -> IoResult<()> {
+        for (id, ((pos, clause_addr), flags)) in self.idflags.clauses() {
+            if flags.has_check_schedule() {
+                write!(wt, "k {} l {} ", id, pos)?;
+                for &lit in self.db.retrieve_clause(*clause_addr) {
+                    write!(wt, "{} ", lit)?;
+                }
+                write!(wt, "0\n")?;
+                self.stats.new_core();
+            }
+        }
+        Ok(())
+    }
+}
+
+pub struct TrimmedFragment<'a> {
+    db: &'a mut CheckerDb,
+    proof: &'a mut ForwardsProof,
+}
+impl<'a> TrimmedFragment<'a> {
+    pub fn dump<W: Write>(mut self, wt: &mut W) {
+        self.proof.write(&mut self.db, wt).unwrap_or_else(|e| panic!(format!("{}", e)));
+    }
+}
+impl<'a> Drop for TrimmedFragment<'a> {
+    fn drop(&mut self) {
+        self.proof.clean(&mut self.db);
     }
 }

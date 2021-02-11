@@ -1,407 +1,505 @@
 use std::{
-    num::{NonZeroU32},
-    mem::{self, MaybeUninit, ManuallyDrop},
+    mem::{self, MaybeUninit},
+    ptr::{self, NonNull},
+    cmp::{Ordering},
+    slice::{self},
 };
 
-#[derive(Copy, Clone, Debug)]
-pub struct DatabaseAddress {
-    main: u8,
-    sub: NonZeroU32,
+#[repr(transparent)]
+#[derive(Copy, Clone)]
+pub struct DbAddress {
+    ptr: NonNull<u32>
 }
-impl DatabaseAddress {
-    pub fn new(main: u8, sub: NonZeroU32) -> DatabaseAddress {
-        DatabaseAddress { main: main, sub: sub }
-    }
-    pub fn serialize(self) -> (u32, u32) {
-        (self.main as u32, self.sub.get() as u32)
-    }
-}
-
-struct ChunkDatabase {
-    array: Vec<u32>,
-    free: Option<NonZeroU32>,
-    score: u32,
-}
-impl ChunkDatabase {
-    const ThresholdScore: u32 = 1024u32;
-    fn new(cap: Option<usize>) -> ChunkDatabase {
-        let score = cap.unwrap_or(u32::max_value() as usize).min((u32::max_value() - 1u32) as usize) as u32;
-        ChunkDatabase {
-            array: Vec::new(),
-            free: None,
-            score: score,
-        }
+impl DbAddress {
+    #[inline(always)]
+    fn new(ptr: *mut u32) -> DbAddress {
+        DbAddress { ptr: unsafe { NonNull::new_unchecked(ptr) } }
     }
     #[inline(always)]
-    fn full(&self) -> bool {
-        self.score == 0u32
-    }
-    unsafe fn allocate(&mut self) -> NonZeroU32 {
-        self.score -= 1u32;
-        if let Some(addr) = self.free {
-            let slot = ChunkDatabase::next_mut(&mut self.array, addr);
-            self.free = *slot;
-            *slot = None;
-            addr
-        } else {
-            let len = self.array.len();
-            self.array.resize(len + 8usize, mem::transmute::<Option<NonZeroU32>, u32>(None));
-            let addr = NonZeroU32::new_unchecked((len >> 3) as u32 + 1u32);
-            addr
-        }
-    }
-    unsafe fn deallocate(&mut self, addr: NonZeroU32) {
-        let last = {
-            let mut current = addr;
-            loop { 
-                self.score += 1u32;
-                match ChunkDatabase::next(&self.array, current) {
-                    Some(next) => current = *next,
-                    None => break current,
-                }
-            }
-        };
-        *ChunkDatabase::next_mut(&mut self.array, last) = self.free;
-        self.free = Some(addr);
-    }
-    #[inline(always)]
-    fn address(pos: usize) -> NonZeroU32 {
-        unsafe { NonZeroU32::new_unchecked(((pos >> 3) + 1usize) as u32) }
-    }
-    #[inline(always)]
-    fn go(addr: NonZeroU32) -> usize {
-        ((addr.get() - 1u32) as usize) << 3
-    }
-    #[inline]
-    unsafe fn next(vec: &Vec<u32>, addr: NonZeroU32) -> &Option<NonZeroU32> {
-        mem::transmute::<&u32, &Option<NonZeroU32>>(vec.get_unchecked(ChunkDatabase::go(addr)))
-    }
-    #[inline]
-    unsafe fn next_mut(vec: &mut Vec<u32>, addr: NonZeroU32) -> &mut Option<NonZeroU32> {
-        mem::transmute::<&mut u32, &mut Option<NonZeroU32>>(vec.get_unchecked_mut(ChunkDatabase::go(addr)))
-    }
-    unsafe fn retrieve<'a, 'b: 'a>(&'b self, addr: NonZeroU32) -> Record<'a> {
-        Record::<'a> {
-            cdb: self,
-            addr: addr,
-        }
-    }
-    unsafe fn copy_record<'a, I>(&mut self, iter: I) -> (NonZeroU32, usize) where
-        I: Iterator<Item = &'a u32>
-    {
-        let addr = self.allocate();
-        let mut count = 0u32;
-        let mut pos = ChunkDatabase::go(addr) + 1usize;
-        for &elem in iter {
-            if pos & 0b111usize == 0b111usize {
-                let next = self.allocate();
-                *self.array.get_unchecked_mut(pos & !0b111usize) = mem::transmute::<Option<NonZeroU32>, u32>(Some(next));
-                pos = ChunkDatabase::go(next);
-            }
-            pos += 1usize;
-            count += 1u32;
-            *self.array.get_unchecked_mut(pos) = elem;
-        }
-        *self.array.get_unchecked_mut(ChunkDatabase::go(addr) + 1usize) = count;
-        (addr, pos)
+    fn get(self) -> *mut u32 {
+        self.ptr.as_ptr()
     }
 }
 
 pub struct Database {
-    cdbs: [MaybeUninit<ChunkDatabase>; 256],
-    active: usize,
-    length: usize,
-    capacity: Option<usize>,
+    ptrs: Vec<*mut u32>,
+    pools: [*mut u32; Database::NumberOfBuckets],
+    free: usize,
 }
 impl Database {
+    const StorageSize: usize = Database::MaximumRecordSize << 8;
+    const MaximumRecordSize: usize = 1usize << Database::NumberOfBuckets;
+    const MaximumAllocableSliceSize: usize = Database::MaximumRecordSize - 2usize;
+    const NumberOfBuckets: usize = 16usize;
+    const MaximumBucket: usize = Database::NumberOfBuckets - 1usize;
+    const AllocationThreshold: usize = Database::MaximumRecordSize << 4;
     pub fn new() -> Database {
-        Database::make(None)
-    }
-    pub fn with_capacity(cap: usize) -> Database {
-        Database::make(Some(cap))
-    }
-    fn make(cap: Option<usize>) -> Database {
-        let mut cdbs: [MaybeUninit<ChunkDatabase>; 256] = unsafe { MaybeUninit::uninit().assume_init() };
-        cdbs[0] = MaybeUninit::new(ChunkDatabase::new(cap));
         Database {
-            cdbs: cdbs,
-            active: 0usize,
-            length: 1usize,
-            capacity: cap
+            ptrs: Vec::new(),
+            pools: [ptr::null_mut(); Database::NumberOfBuckets],
+            free: 0usize,
         }
     }
-    pub fn open<'a, 'b: 'a>(&'b mut self) -> DatabaseWriter<'a> {
-        let active = if unsafe { self.cdbs[self.active].get_ref().full() } {
-            self.request_cdb(ChunkDatabase::ThresholdScore)
+    pub fn allocate32(&mut self, slice: &[u32]) -> Option<DbAddress> {
+        if slice.len() < Database::MaximumAllocableSliceSize {
+            let record_size = (slice.len() + 2usize) & !1usize;
+            let mut ptr = self.allocate_record(record_size);
+            let addr = DbAddress::new(ptr);
+            unsafe { *ptr = slice.len() as u32 };
+            ptr = unsafe { ptr.add(1usize) };
+            for &n in slice {
+                unsafe { *ptr = n; }
+                ptr = unsafe { ptr.add(1usize) };
+            }
+            Some(addr)
         } else {
-            self.active
+            None
+        }
+    }
+    pub fn allocate64(&mut self, slice: &[u64]) -> Option<DbAddress> {
+        let length = slice.len() << 1;
+        if length < Database::MaximumAllocableSliceSize {
+            let record_size = (length + 3usize) & !1usize;
+            let mut ptr = self.allocate_record(record_size);
+            let addr = DbAddress::new(ptr);
+            unsafe { *ptr = length as u32 };
+            ptr = unsafe { ptr.add(2usize) };
+            for &n in slice {
+                unsafe { *mem::transmute::<*mut u32, *mut u64>(ptr) = n; }
+                ptr = unsafe { ptr.add(2usize) };
+            }
+            Some(addr)
+        } else {
+            None
+        }
+    }
+    pub fn allocate128(&mut self, slice: &[u128]) -> Option<DbAddress> {
+        let length = slice.len() << 2;
+        if length < Database::MaximumAllocableSliceSize {
+            let record_size = (length + 5usize) & !1usize;
+            let mut ptr = self.allocate_record(record_size);
+            let addr = DbAddress::new(ptr);
+            unsafe { *ptr = length as u32 };
+            ptr = ((ptr as usize + 16usize) & !15usize) as *mut u32;
+            for &n in slice {
+                unsafe { *mem::transmute::<*mut u32, *mut u128>(ptr) = n; }
+                ptr = unsafe { ptr.add(4usize) };
+            }
+            Some(addr)
+        } else {
+            None
+        }
+    }
+    pub fn deallocate32(&mut self, addr: DbAddress) {
+        let start = addr.get();
+        let length = unsafe { *start as usize };
+        let record_size = (length + 2usize) & !1usize;
+        let bucket = unsafe { Database::size_to_bucket(record_size) };
+        Database::split_in_buckets(&mut self.pools, start, record_size, bucket);
+        self.free += record_size;
+    }
+    pub fn deallocate64(&mut self, addr: DbAddress) {
+        let start = addr.get();
+        let length = unsafe { *start as usize };
+        let record_size = (length + 3usize) & !1usize;
+        let bucket = unsafe { Database::size_to_bucket(record_size) };
+        Database::split_in_buckets(&mut self.pools, start, record_size, bucket);
+        self.free += record_size;
+    }
+    pub fn deallocate128(&mut self, addr: DbAddress) {
+        let start = addr.get();
+        let length = unsafe { *start as usize };
+        let record_size = (length + 5usize) & !1usize;
+        let bucket = unsafe { Database::size_to_bucket(record_size) };
+        Database::split_in_buckets(&mut self.pools, start, record_size, bucket);
+        self.free += record_size;
+    }
+    pub fn retrieve32(&self, addr: DbAddress) -> &[u32] {
+        let length = unsafe { *addr.get() as usize};
+        unsafe { slice::from_raw_parts(addr.get().add(1usize), length) }
+    }
+    pub fn retrieve64(&self, addr: DbAddress) -> &[u64] {
+        let length = unsafe { ((*addr.get()) >> 1) as usize };
+        let ptr64 = unsafe { mem::transmute::<*mut u32, *mut u64>(addr.get().add(2usize)) };
+        unsafe { slice::from_raw_parts(ptr64, length) }
+    }
+    pub fn retrieve128(&self, addr: DbAddress) -> &[u128] {
+        let length = unsafe { ((*addr.get()) >> 2) as usize };
+        let ptr128 = ((addr.get() as usize + 16usize) & !15usize) as *mut u128;
+        unsafe { slice::from_raw_parts(ptr128, length) }
+    }
+    fn allocate_record(&mut self, record_size: usize) -> *mut u32 {
+        let bucket = if let Some(bucket) = self.allocate_record_from_pools(record_size) {
+            bucket
+        } else {
+            self.restructure(record_size)
         };
-        let addr = unsafe { self.cdbs[active].get_mut().allocate() };
-        DatabaseWriter::<'a> {
-            db: self,
-            active: active,
-            pos: ChunkDatabase::go(addr) + 1usize,
-            count: 0u32,
-            addr: addr,
+        let ptr = self.pools[bucket];
+        self.pools[bucket] = unsafe { *Database::as_ptr(ptr) };
+        unsafe { Database::split_in_buckets(&mut self.pools, ptr.add(record_size), (1usize << (bucket + 1)) - record_size, bucket); }
+        self.free -= record_size;
+        ptr
+    }
+    fn allocate_record_from_pools(&self, record_size: usize) -> Option<usize> {
+        let mut bucket = unsafe { Database::size_to_bucket(record_size) };
+        while bucket < Database::NumberOfBuckets {
+            if !self.pools[bucket].is_null() {
+                return Some(bucket);
+            }
+            bucket += 1usize;
+        }
+        None
+    }
+    fn restructure(&mut self, record_size: usize) -> usize {
+        let bucket_opt = if self.free >= Database::AllocationThreshold {
+            let mut dfg = Defragmentator::new(self);
+            if dfg.defragment() >= self.free / 2 {
+                None
+            } else {
+                self.allocate_record_from_pools(record_size)
+            }
+        } else {
+            None
+        };
+        if let Some(bucket) = bucket_opt {
+            bucket
+        } else {
+            self.storage();
+            Database::MaximumBucket
         }
     }
-    pub unsafe fn retrieve<'a, 'b: 'a>(&'b self, addr: DatabaseAddress) -> Record<'a> {
-        self.cdbs[addr.main as usize].get_ref().retrieve(addr.sub)
-    }
-    pub unsafe fn iterator_unsafe(&self, addr: DatabaseAddress) -> UnsafeRecordIterator {
-        let rf = &self.cdbs[addr.main as usize].get_ref().array;
-        let pos = ChunkDatabase::go(addr.sub) + 1usize;
-        let count = *rf.get_unchecked(pos);
-        UnsafeRecordIterator {
-            array: rf,
-            count: count,
-            pos: pos,
+    fn storage(&mut self) {
+        let mut vec = Vec::<u64>::with_capacity(Database::StorageSize >> 1);
+        unsafe { vec.set_len(Database::StorageSize >> 1); }
+        let bx_slice: Box<[u64]> = vec.into_boxed_slice();
+        let ptr_slice: *mut [u64] = Box::into_raw(bx_slice);
+        let ptr64: *mut u64 = unsafe { (*ptr_slice).as_mut_ptr() };
+        let ptr = unsafe { mem::transmute::<*mut u64, *mut u32>(ptr64) };
+        self.ptrs.push(ptr);
+        self.ptrs.sort();
+        let mut chunk_ptr = ptr;
+        let end = unsafe { ptr.add(Database::StorageSize) };
+        while chunk_ptr != end {
+            let next_ptr = unsafe { chunk_ptr.add(Database::MaximumRecordSize) };
+            let link = if next_ptr != end {
+                next_ptr
+            } else {
+                self.pools[Database::MaximumBucket]
+            };
+            unsafe { *Database::as_ptr(chunk_ptr) = link; }
+            chunk_ptr = next_ptr;
         }
+        self.pools[Database::MaximumBucket] = ptr;
+        self.free += Database::StorageSize;
     }
-    pub unsafe fn remove(&mut self, addr: DatabaseAddress) {
-        self.cdbs[addr.main as usize].get_mut().deallocate(addr.sub)
-    }
-    fn request_cdb(&mut self, cap: u32) -> usize {
-        let mut best_score = 0u32;
-        let mut best_index = 0usize;
-        for n in 0usize .. self.length {
-            let score = unsafe { self.cdbs[n].get_mut().score };
-            if score > best_score {
-                best_score = score;
-                best_index = n;
+    fn split_in_buckets(pools: &mut [*mut u32; Database::NumberOfBuckets], ptr: *mut u32, size: usize, bucket: usize) {
+        if size != 0usize {
+            let mut curr_ptr = ptr;
+            let mut curr_bucket = usize::min(bucket, Database::MaximumBucket);
+            if curr_bucket == Database::MaximumBucket {
+                let mut num_max = size >> (curr_bucket + 1);
+                while num_max > 0usize {
+                    curr_ptr = unsafe { Database::free_chunk(pools, curr_ptr, curr_bucket, Database::MaximumRecordSize) };
+                    num_max -= 1usize;
+                }
+                curr_bucket -= 1usize;
+            }
+            let mut curr_mask = 1usize << (curr_bucket + 1);
+            while curr_mask > 1usize {
+                if size & curr_mask != 0usize {
+                    curr_ptr = unsafe { Database::free_chunk(pools, curr_ptr, curr_bucket, curr_mask) };
+                }
+                curr_mask >>= 1;
+                curr_bucket = curr_bucket.wrapping_sub(1usize);
             }
         }
-        if best_score < cap && self.length < 256usize {
-            self.cdbs[self.length] = MaybeUninit::new(ChunkDatabase::new(self.capacity));
-            best_index = self.length;
-            self.length += 1usize;
-        }
-        if unsafe { self.cdbs[best_index].get_ref().score < cap } {
-            Database::capacity_exceeded();
-        }
-        best_index
     }
-    fn capacity_exceeded() -> ! {
-        panick!("database capacity exceeded", lock, {
-            append!(lock, "Could not allocate database space.");
-        })
+    #[inline(always)]
+    unsafe fn as_ptr(ptr: *mut u32) -> *mut *mut u32 {
+        mem::transmute::<*mut u32, *mut *mut u32>(ptr)
     }
-    fn length_exceeded() -> ! {
-        panick!("record capacity exceeded", lock, {
-            append!(lock, "A record exceeded the maximum record length in the database.");
-        })
+    #[inline(always)]
+    unsafe fn free_chunk(pools: &mut [*mut u32; Database::NumberOfBuckets], ptr: *mut u32, bucket: usize, size: usize) -> *mut u32 {
+        let pool = &mut pools[bucket];
+        *Database::as_ptr(ptr) = *pool;
+        *pool = ptr;
+        ptr.add(size)
+    }
+    #[inline(always)]
+    unsafe fn size_to_bucket (size: usize) -> usize {
+        (8u32 * mem::size_of::<usize>() as u32)
+            .checked_sub((size - 1usize).leading_zeros() + 1u32)
+            .map_or_else(|| Database::MaximumBucket, |x| x as usize)
     }
 }
 impl Drop for Database {
     fn drop(&mut self) {
-        for n in 0usize .. self.length {
-            let mut mu = MaybeUninit::<ChunkDatabase>::uninit();
-            mem::swap(&mut mu, &mut self.cdbs[n]);
-            unsafe { mu.assume_init(); }
+        for &ptr in &self.ptrs {
+            unsafe { Vec::<u32>::from_raw_parts(ptr, Database::StorageSize, Database::StorageSize); }
         }
     }
 }
 
-#[derive(Copy, Clone)]
-pub struct Record<'a> {
-    cdb: &'a ChunkDatabase,
-    addr: NonZeroU32,
+pub struct DefragmentatorItem {
+    ptr: *mut u32,
+    bucket: u8,
 }
-impl<'a> Record<'a> {
-    #[inline]
-    pub fn length(&self) -> usize {
-        unsafe { *self.cdb.array.get_unchecked(ChunkDatabase::go(self.addr) + 1usize) as usize }
+impl DefragmentatorItem {
+    #[inline(always)]
+    fn new(ptr: *mut u32, bucket: u8) -> DefragmentatorItem {
+        DefragmentatorItem { ptr: ptr, bucket: bucket }
     }
-    pub fn get(&self, n: usize) -> Option<&'a u32> {
-        if n < self.length() {
-            let chunk = (n + 1usize) / 7usize;
-            let pos = ((n + 1usize) % 7usize) + 1usize;
-            let mut addr = self.addr;
-            for _ in 0 .. chunk {
-                addr = unsafe { *ChunkDatabase::next(&self.cdb.array, addr).as_ref().unwrap() };
-            }
-            unsafe { Some(self.cdb.array.get_unchecked(ChunkDatabase::go(addr) + pos)) }
-        } else {
-            None
-        }
+    #[inline(always)]
+    fn pointer(&self) -> *mut u32 {
+        self.ptr
+    }
+    #[inline(always)]
+    fn size(&self) -> usize {
+        1usize << (self.bucket + 1u8)
+    }
+    #[inline(always)]
+    fn bucket(&self) -> usize {
+        self.bucket as usize
     }
 }
-impl<'a> IntoIterator for Record<'a> {
-    type Item = &'a u32;
-    type IntoIter = RecordIterator<'a>;
-    fn into_iter(self) -> RecordIterator<'a> {
-        let pos = ChunkDatabase::go(self.addr) + 1usize;
-        let count = *unsafe { self.cdb.array.get_unchecked(pos) };
-        RecordIterator::<'a> {
-            cdb: self.cdb,
-            count: count,
-            pos: pos,
-        }
+impl PartialEq for DefragmentatorItem {
+    #[inline(always)]
+    fn eq(&self, other: &DefragmentatorItem) -> bool {
+        self.ptr == other.ptr
     }
 }
-impl<'a, 'b: 'a> IntoIterator for &'a Record<'b> {
-    type Item = &'a u32;
-    type IntoIter = RecordIterator<'a>;
-    fn into_iter(self) -> RecordIterator<'a> {
-        let pos = ChunkDatabase::go(self.addr) + 1usize;
-        let count = *unsafe { self.cdb.array.get_unchecked(pos) };
-        RecordIterator::<'a> {
-            cdb: self.cdb,
-            count: count,
-            pos: pos,
-        }
+impl Eq for DefragmentatorItem {}
+impl PartialOrd for DefragmentatorItem {
+    #[inline(always)]
+    fn partial_cmp(&self, other: &DefragmentatorItem) -> Option<Ordering> {
+        self.ptr.partial_cmp(&other.ptr)
+    }
+}
+impl Ord for DefragmentatorItem {
+    #[inline(always)]
+    fn cmp(&self, other: &DefragmentatorItem) -> Ordering {
+        self.ptr.cmp(&other.ptr)
     }
 }
 
-pub struct RecordIterator<'a> {
-    cdb: &'a ChunkDatabase,
-    count: u32,
-    pos: usize,
-}
-impl<'a> Iterator for RecordIterator<'a> {
-    type Item = &'a u32;
-    fn next(&mut self) -> Option<&'a u32> {
-        if self.count == 0u32 {
-            None
-        } else {
-            if self.pos & 0b111usize == 0b111usize {
-                self.pos = unsafe { ChunkDatabase::go(*ChunkDatabase::next(&self.cdb.array, ChunkDatabase::address(self.pos)).as_ref().unwrap()) };
-            }
-            self.pos += 1usize;
-            self.count -= 1u32;
-            self.cdb.array.get(self.pos)
-        }
-    }
-}
-
-pub struct UnsafeRecordIterator {
-    array: *const Vec<u32>,
-    count: u32,
-    pos: usize,
-}
-impl UnsafeRecordIterator {
-    pub unsafe fn next(&mut self) -> Option<u32> {
-        if self.count == 0u32 {
-            None
-        } else {
-            let rf = &*self.array;
-            if self.pos & 0b111usize == 0b111usize {
-                self.pos = ChunkDatabase::go(*ChunkDatabase::next(rf, ChunkDatabase::address(self.pos)).as_ref().unwrap());
-            }
-            self.pos += 1usize;
-            self.count -= 1u32;
-            Some(*rf.get_unchecked(self.pos))
-        }
-    }
-}
-
-pub struct DatabaseWriter<'a> {
+pub struct Defragmentator<'a> {
+    pools: [Vec<*mut u32>; Database::NumberOfBuckets],
+    counts: [u8; Database::NumberOfBuckets],
+    buffer: Vec<DefragmentatorItem>,
     db: &'a mut Database,
-    active: usize,
-    pos: usize,
-    count: u32,
-    addr: NonZeroU32,
 }
-impl<'a> DatabaseWriter<'a> {
-    pub fn write(&mut self, elem: u32) {
-        if self.count == u32::max_value() {
-            Database::length_exceeded();
-        }
-        if self.pos & 0b111usize == 0b111usize {
-            self.allocate();
-        }
-        self.pos += 1usize;
-        self.count += 1u32;
-        *unsafe { self.db.cdbs[self.active].get_mut().array.get_unchecked_mut(self.pos) } = elem;
-    }
-    pub fn close(self) -> DatabaseAddress {
-        *unsafe { self.db.cdbs[self.active].get_mut().array.get_unchecked_mut(ChunkDatabase::go(self.addr) + 1usize) } = self.count;
-        self.db.active = self.active;
-        let md = ManuallyDrop::new(self);
-        DatabaseAddress {
-            main: md.active as u8,
-            sub: md.addr,
-        }
-    }
-    fn allocate(&mut self) {
-        {
-            let rf = unsafe { self.db.cdbs[self.active].get_mut() };
-            if rf.full() {
-                *unsafe { rf.array.get_unchecked_mut(ChunkDatabase::go(self.addr) + 1usize) } = self.count;
-                self.reallocate();
+impl<'a> Defragmentator<'a> {
+    const MaxFetch: usize = u8::max_value() as usize;
+    fn new(db: &mut Database) -> Defragmentator {
+        let mut vpools = {
+            let mut data: [MaybeUninit<Vec<*mut u32>>; Database::NumberOfBuckets] =
+                unsafe { MaybeUninit::uninit().assume_init() };
+            for elem in &mut data[..] {
+                *elem = MaybeUninit::new(Vec::new());
             }
+            unsafe { mem::transmute::<
+                [MaybeUninit<Vec<*mut u32>>; Database::NumberOfBuckets],
+                [Vec<*mut u32>; Database::NumberOfBuckets]>(data)
+            }
+        };
+        let mut counts = [0u8; Database::NumberOfBuckets];
+        let mut buffer: Vec<DefragmentatorItem> = Vec::new();
+        for bucket in 0 .. Database::NumberOfBuckets {
+            let mut ptr = db.pools[bucket];
+            db.pools[bucket] = ptr::null_mut();
+            let vpool = &mut vpools[bucket];
+            while !ptr.is_null() {
+                vpool.push(ptr);
+                ptr = unsafe { *Database::as_ptr(ptr) };
+            }
+            vpool.sort_by(|x, y| x.cmp(y).reverse());
+            let len = vpool.len();
+            let fetch = usize::min(len, Defragmentator::MaxFetch);
+            counts[bucket] = fetch as u8;
+            for &ptr in &vpool[(len - fetch) .. len] {
+                buffer.push(DefragmentatorItem::new(ptr, bucket as u8));
+            }
+            vpool.resize(len - fetch, ptr::null_mut());
         }
-        let rf = unsafe { self.db.cdbs[self.active].get_mut() };
-        let next = unsafe { rf.allocate() };
-        unsafe { *rf.array.get_unchecked_mut(self.pos & !0b111usize) = mem::transmute::<Option<NonZeroU32>, u32>(Some(next)); }
-        self.pos = ChunkDatabase::go(next);
+        buffer.sort_by(|x, y| x.cmp(y).reverse());
+        Defragmentator {
+            pools: vpools,
+            counts: counts,
+            buffer: buffer,
+            db: db,
+        }
     }
-    fn reallocate(&mut self) {
-        let cap_raw = ((self.count as u64) + 1u64) / 7u64 + 1u64;
-        let cap = ((u32::max_value() - 1u32) as u64).min(cap_raw) as u32;
-        let newactive = self.db.request_cdb(cap);
-        let oldcdb = unsafe { (*self.db.cdbs.as_mut_ptr().add(self.active)).get_mut() };
-        let newcdb = unsafe { (*self.db.cdbs.as_mut_ptr().add(newactive)).get_mut() };
-        let (newaddr, newpos) = unsafe { newcdb.copy_record(oldcdb.retrieve(self.addr).into_iter()) };
-        unsafe { oldcdb.deallocate(self.addr); }
-        self.active = newactive;
-        self.pos = newpos;
-        self.addr = newaddr;
+    fn defragment(&mut self) -> usize {
+        let mut ptrs_it = self.db.ptrs.iter();
+        let mut stg_end: *mut u32 = ptr::null_mut();
+        let mut gap_start: *mut u32 = ptr::null_mut();
+        let mut gap_size = 0usize;
+        let mut gap_end = gap_start;
+        let mut unmergeable = 0usize;
+        let mut merged = false;
+        while let Some(item) = self.buffer.pop() {
+            let bucket = item.bucket();
+            let count = &mut self.counts[bucket];
+            *count -= 1u8;
+            if *count == 0u8 {
+                let pool = &mut self.pools[bucket];
+                let len = pool.len();
+                let fetch = usize::min(len, Defragmentator::MaxFetch);
+                *count = fetch as u8;
+                for &ptr in &pool[(len - fetch) .. len] {
+                    self.buffer.push(DefragmentatorItem::new(ptr, bucket as u8));
+                }
+                pool.resize(len - fetch, ptr::null_mut());
+                self.buffer.sort_by(|x, y| x.cmp(y).reverse());
+            }
+            let next_ptr = item.pointer();
+            let size = item.size();
+            merged |= size & gap_size != 0usize;
+            if next_ptr != gap_end || next_ptr >= stg_end {
+                Defragmentator::merge(&mut self.db.pools, gap_start, gap_size);
+                if !merged {
+                    unmergeable += gap_size;
+                }
+                merged = false;
+                gap_start = next_ptr;
+                gap_size = 0;
+                gap_end = next_ptr;
+            }
+            while next_ptr >= stg_end {
+                stg_end = unsafe { (ptrs_it.next().unwrap()).add(Database::StorageSize) };
+            }
+            gap_end = unsafe { gap_end.add(size) };
+            gap_size += size;
+        }
+        Defragmentator::merge(&mut self.db.pools, gap_start, gap_size);
+        unmergeable
     }
-}
-impl<'a> Drop for DatabaseWriter<'a> {
-    fn drop(&mut self) {
-        unsafe { self.db.cdbs[self.active].get_mut().deallocate(self.addr); }
-        self.db.active = self.active;
+    #[inline]
+    fn merge(pools: &mut [*mut u32; Database::NumberOfBuckets], ptr: *mut u32, size: usize) {
+        if size > 0usize {
+            let bucket = unsafe { usize::min(Database::MaximumBucket, Database::size_to_bucket(size)) };
+            Database::split_in_buckets(pools, ptr, size, bucket);
+        }
     }
 }
 
 #[cfg(test)]
 pub mod test {
-	use rand::{self, Rng};
-	use crate::{
-        database::{Database, DatabaseAddress},
+    use std::ptr::{NonNull};
+    use rand::{self, Rng};
+    use crate::{
+        database::{DbAddress, Database},
     };
 
-	fn generate_record<R: Rng>(rng: &mut R, maxlength: usize) -> Vec<u32> {
-        let length = rng.gen_range(0usize, maxlength + 1usize);
+	fn generate_record32<R: Rng>(rng: &mut R, maxlength: usize) -> Vec<u32> {
+        let length = rng.gen_range(0usize, maxlength);
         let mut vec = Vec::new();
+        vec.reserve(length);
         for _ in 0 .. length {
             vec.push(rng.gen());
         }
         vec
     }
-    
-    #[test]
-    fn test_database() {
-        let mut rng = rand::thread_rng();
-        let mut db = Database::with_capacity(10000usize);
-        for _ in 0 .. 100 {
-            let mut records = Vec::<(DatabaseAddress, Vec<u32>)>::new();
-            for _ in 0 .. 1000 {
-                let record = generate_record(&mut rng, 500usize);
-                let mut wt = db.open();
-                for &elem in &record {
-                    wt.write(elem);
-                }
-                let addr = wt.close();
-                records.push((addr, record));
-            }
-            for (addr, record) in &records {
-                let mut dbit = unsafe { db.retrieve(*addr).into_iter() };
-                let mut rcit = record.iter();
-                loop { match (dbit.next(), rcit.next()) {
-                    (Some(n), Some(m)) => assert!(n == m),
-                    (None, None) => break,
-                    _ => assert!(false),
-                } }
-                unsafe { db.remove(*addr); }
-            }
-            let len = db.length;
-            for n in 0 .. len {
-                unsafe { assert!(db.cdbs[n].get_ref().score as usize == db.capacity.unwrap()); }
+	fn generate_record64<R: Rng>(rng: &mut R, maxlength: usize) -> Vec<u64> {
+        let length = rng.gen_range(0usize, maxlength);
+        let mut vec = Vec::new();
+        vec.reserve(length);
+        for _ in 0 .. length {
+            vec.push(rng.gen());
+        }
+        vec
+    }
+	fn generate_record128<R: Rng>(rng: &mut R, maxlength: usize) -> Vec<u128> {
+        let length = rng.gen_range(0usize, maxlength);
+        let mut vec = Vec::new();
+        vec.reserve(length);
+        for _ in 0 .. length {
+            vec.push(rng.gen());
+        }
+        vec
+    }
+
+    enum Record {
+        U32(Vec<u32>),
+        U64(Vec<u64>),
+        U128(Vec<u128>),
+    }
+    impl Record {
+        fn generate<R: Rng>(rng: &mut R) -> Record {
+            let bucket = rng.gen_range(0usize, Database::NumberOfBuckets);
+            if rng.gen() {
+                let maxlength = usize::min(Database::MaximumAllocableSliceSize, 1usize << (bucket + 1usize));
+                Record::U32(generate_record32(rng, maxlength))
+            } else if rng.gen() {
+                let maxlength = usize::min(Database::MaximumAllocableSliceSize >> 1, 1usize << (bucket + 1usize));
+                Record::U64(generate_record64(rng, maxlength))
+            } else {
+                let maxlength = usize::min(Database::MaximumAllocableSliceSize >> 2, 1usize << (bucket + 1usize));
+                Record::U128(generate_record128(rng, maxlength))
             }
         }
     }
-    
+
+    #[test]
+    fn test_database() {
+        let mut rng = rand::thread_rng();
+        let mut db = Database::new();
+        let mut old = Vec::<(DbAddress, Record)>::new();
+        for _ in 0 .. 10 {
+            let mut records = Vec::<(DbAddress, Record, bool)>::new();
+            for _ in 0 .. 1000 {
+                let record = Record::generate(&mut rng);
+                let del: bool = rng.gen();
+                let addr = DbAddress { ptr: NonNull::dangling() };
+                records.push((addr, record, del))
+            }
+            for (addr, record, _) in &mut records {
+                let opt_addr = match &record {
+                    Record::U32(v) => db.allocate32(v),
+                    Record::U64(v) => db.allocate64(v),
+                    Record::U128(v) => db.allocate128(v),
+                };
+                *addr = opt_addr.unwrap();
+            }
+            while let Some((addr, record, del)) = records.pop() {
+                if del {
+                    match record {
+                        Record::U32(_) => db.deallocate32(addr),
+                        Record::U64(_) => db.deallocate64(addr),
+                        Record::U128(_) => db.deallocate128(addr),
+                    }
+                } else {
+                    old.push((addr, record));
+                }
+            }
+            let mut size = 0usize;
+            for (addr, record) in &old {
+                match record {
+                    Record::U32(v) => {
+                        assert!(&v[..] == db.retrieve32(*addr));
+                        size += (v.len() + 2usize) & !1usize;
+                    },
+                    Record::U64(v) => {
+                        assert!(&v[..] == db.retrieve64(*addr));
+                        size += ((v.len() << 1) + 3usize) & !1usize
+                    },
+                    Record::U128(v) => {
+                        assert!(&v[..] == db.retrieve128(*addr));
+                        size += ((v.len() << 2) + 5usize) & !1usize
+                    },
+                }
+            }
+            for bucket in 0 .. Database::NumberOfBuckets {
+                let mut count = 0usize;
+                let mut ptr = db.pools[bucket];
+                while !ptr.is_null() {
+                    count += 1usize;
+                    ptr = unsafe { *Database::as_ptr(ptr) };
+                }
+                size += (1 << (bucket + 1)) * count;
+            }
+            assert!(size == Database::StorageSize * db.ptrs.len());
+        }
+    }
+
 }

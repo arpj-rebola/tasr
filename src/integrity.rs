@@ -604,3 +604,27 @@ impl IntegrityVerifier {
         self.stats.log_error(IntegrityError::MissingQed(pos.with_path(&self.original)));
     }
 }
+
+// #[cfg(test)]
+// mod test {
+//     fn check_instance(cnf: &Path, asr: &Path) {
+//         let cnf_file = File::open(cnf);
+//         let cnf_input = InputReader::new(cnf_file, cnf, false);
+//         let cnf_parser = TextAsrParser::new(cnf_input);
+//         let asr_file = File::open(asr);
+//         let asr_input = InputReader::new(asr_file, asr, false);
+//         let asr_parser = TextAsrParser::new(asr_input);
+//         let config = IntegrityConfig {
+//             preprocessing: false,
+//             select: 1u64,
+//             parts: 1u64,
+//         };
+//         let checker = IntegrityVerifier::new(config);
+//         checker.check(&mut cnf_parser, &mut asr_parser);
+
+//     }
+//     #[test]
+//     fn test_integrity() {
+
+//     }
+// }

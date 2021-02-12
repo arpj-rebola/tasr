@@ -171,7 +171,14 @@ pub struct PreprocessingConfig {
 }
 impl PreprocessingConfig {
     pub fn run(self) -> PreprocessingResult {
+        progress!("checking file integrity...", lock, {
+            append!(lock, "Checking the CNF file {} and raw ASR file {} for format errors and undefined references.", self.cnf.display(), self.asr.display());
+        });
         let (integrity, opt_data) = self.check_integrity();
+        progress!("preprocessing ASR proof...", lock, {
+            append!(lock, "Preprocessing the raw ASR file {} into the preprocessed ASR file {} to reuse indices, trim unnecessary inferences, and reduce complex proof steps.",
+                self.asr.display(), self.output.as_ref().map(|x| x.display()).unwrap_or_else(|| self.asr.display()));
+        });
         let (preprocessing, result) = if let Some(data) = opt_data {
             (Some(self.preprocess(data)), true)
         } else {
@@ -278,13 +285,20 @@ pub struct CheckingConfig {
     pub cnf_binary: bool,
     pub asr: PathBuf,
     pub asr_binary: bool,
+    pub permissive: bool,
     pub select: u64,
     pub parts: u64,
     pub stats: bool,
 }
 impl CheckingConfig {
     pub fn run(self) -> CheckingResult {
+        progress!("Checking file integrity...", lock, {
+            append!(lock, "Checking the CNF file {} and preprocessed ASR file {} for format errors and undefined references.", self.cnf.display(), self.asr.display());
+        });
         let (integrity, opt_data) = self.check_integrity();
+        progress!("Checking proof correctness...", lock, {
+            append!(lock, "Checking that inferences in the preprocessed ASR file {} are correct with respect to the CNF file {}.", self.asr.display(), self.cnf.display());
+        });
         let opt_correctness = if let Some(data) = opt_data {
             Some(self.check_correctness(data))
         } else {
@@ -325,6 +339,7 @@ impl CheckingConfig {
             select: self.select,
             parts: self.parts,
             insertions: data.insertions,
+            permissive: self.permissive,
         }
     }
     fn opening_input_error(path: &Path, err: IoError, kind: &str) -> ! {
@@ -382,7 +397,7 @@ impl CheckingResult {
     fn print_correctness_stats(&self) {
         if self.stats {
             if let Some(pp) = &self.correctness {
-                info!("Correctness checking stats", lock, {
+                info!("Correctness check stats", lock, {
                     append!(lock, "{:.<30} {}", "errors", pp.errors.len());
                     breakline!(lock);
                     append!(lock, "{:.<30} {}", "warnings", pp.warnings.len());
@@ -539,6 +554,9 @@ impl Tasr {
             .arg(Arg::with_name("STATS")
                 .long("stats")
                 .help("prints statistics"))
+            .arg(Arg::with_name("PERMISSIVE")
+                .long("--permissive")
+                .help("disables warnings for correct but redundant RUP chains"))
             .arg(Arg::with_name("FORMULA")
                 .index(1u64)
                 .required(true)
@@ -623,6 +641,7 @@ impl Tasr {
                 None => (0u64, 1u64),
             };
             let stats = matches.is_present("STATS");
+            let permissive = matches.is_present("PERMISSIVE");
             let formula = {
                 let mut pb = PathBuf::new();
                 pb.push(matches.value_of("FORMULA").unwrap());
@@ -638,6 +657,7 @@ impl Tasr {
                 cnf_binary: false,
                 asr: proof,
                 asr_binary: false,
+                permissive: permissive,
                 select: part,
                 parts: total,
                 stats: stats,

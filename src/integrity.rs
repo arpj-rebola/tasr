@@ -279,6 +279,7 @@ impl IntegrityStats {
         self.num_premises == cls
     }
     fn log_error(&mut self, err: IntegrityError) {
+        err.show();
         self.errors.push(err)
     }
 }

@@ -30,6 +30,7 @@ impl PropagationChecker {
             checker: self,
             undo: 1usize,
             conflict: conflict,
+            touched: true,
         }
     }
     pub fn wsr_check(&mut self, clause: Clause) -> WsrChecker<'_> {
@@ -54,9 +55,7 @@ impl PropagationChecker {
     }
     pub fn explicit_wsr_check(&mut self, clause: Clause, lateral: Clause, subst: &Substitution) -> ExplicitChecker<'_> {
         let mut conflict = self.assign_complements(clause);
-        if !conflict {
-            conflict = self.assign_mapped_complements(lateral, subst);
-        }
+        conflict |= self.assign_mapped_complements(lateral, subst).0;
         let mut vec = Vec::new();
         for &lit in clause {
             vec.push(lit.complement());
@@ -82,16 +81,19 @@ impl PropagationChecker {
         }
         false
     }
-    fn assign_mapped_complements(&mut self, clause: Clause, subst: &Substitution) -> bool {
-        for lit in clause {
-            let comp = subst.map(lit.complement());
+    fn assign_mapped_complements(&mut self, clause: Clause, subst: &Substitution) -> (bool, bool) {
+        let mut touched: bool = false;
+        for &lit in clause {
+            let map = subst.map(lit);
+            touched |= lit != map;
+            let comp = map.complement();
             match self.model.check_set(comp) {
                 ModelValue::Unassigned => self.prop.push(comp),
                 ModelValue::True => (),
-                ModelValue::False => return true,
+                ModelValue::False => return (true, touched)
             }
         }
-        false
+        (false, touched)
     }
 }
 
@@ -99,22 +101,25 @@ pub struct RupChecker<'a> {
     checker: &'a mut PropagationChecker,
     undo: usize,
     conflict: bool,
+    touched: bool
 }
 impl<'a> RupChecker<'a> {
-    pub fn check_chain(&mut self, opt_chain: Option<Chain<'_>>, db: &CheckerDb, f: &Formula) -> bool {
+    pub fn check_chain(&mut self, opt_chain: Option<Chain<'_>>, db: &CheckerDb, f: &Formula, permissive: bool) -> bool {
         if let Some(chain) = opt_chain {
             for &cid in chain {
                 let cls = db.retrieve_clause(f.get(cid).unwrap());
-                if !self.check_clause(cls) {
+                if !self.check_clause(cls, permissive) {
                     return false
                 }
             }
+            self.conflict
+        } else {
+            !self.touched || self.conflict
         }
-        return self.conflict()
     }
-    pub fn check_clause(&mut self, clause: Clause<'_>) -> bool {
+    pub fn check_clause(&mut self, clause: Clause<'_>, permissive: bool) -> bool {
         if self.conflict {
-            false
+            permissive
         } else {
             let mut prop = Literal::Bottom;
             let mut it = clause.into_iter();
@@ -122,7 +127,7 @@ impl<'a> RupChecker<'a> {
                 match unsafe { self.checker.model.value(lit) } {
                     ModelValue::False => (),
                     ModelValue::Unassigned if prop == Literal::Bottom => prop = lit,
-                    _ => return false,
+                    _ => return permissive,
                 }
             }
             if prop == Literal::Bottom {
@@ -154,11 +159,12 @@ pub struct WsrChecker<'a> {
 impl<'a> WsrChecker<'a> {
     pub fn rup_check(&mut self, lateral: Clause, subst: &Substitution) -> RupChecker<'_> {
         let undo = self.checker.prop.len();
-        let conflict = if self.conflict { true } else { self.checker.assign_mapped_complements(lateral, subst) };
+        let (conflict, touched) = if self.conflict { (true, true) } else { self.checker.assign_mapped_complements(lateral, subst) };
         RupChecker::<'_> {
             checker: &mut *self.checker,
             undo: undo,
             conflict: conflict,
+            touched: touched,
         }
     }
 }
@@ -220,6 +226,7 @@ impl<'a> ExplicitChecker<'a> {
         mem::swap(&mut self.assumed, &mut assumed);
         mem::swap(&mut self.propagations, &mut propagations);
         PropagationError {
+            serious: !self.conflict,
             assumed: assumed,
             propagations: propagations,
         }
@@ -251,15 +258,13 @@ pub enum ExplicitPropagationResult {
 }
 
 pub struct PropagationError {
+    serious: bool,
     assumed: Vec<Literal>,
     propagations: Vec<(ClauseIndex, Vec<Literal>, ExplicitPropagationResult)>,
 }
 impl PropagationError {
     pub fn is_serious(&self) -> bool {
-        !self.propagations.iter().any(|(_, _, x)| match x {
-            ExplicitPropagationResult::Falsified => true,
-            _ => false,
-        })
+        self.serious
     }
     pub fn assumptions(&self) -> &[Literal] {
         &self.assumed[..]

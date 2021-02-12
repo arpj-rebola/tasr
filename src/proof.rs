@@ -120,7 +120,7 @@ impl ForwardsProofInstruction {
             ForwardsProofInstruction::Rup(id, pos, clause_addr, chain_addr) => {
                 write!(wt, "r {} l {} ", id.text(), pos.text())?;
                 for lit in db.retrieve_clause(*clause_addr) {
-                    write!(wt, "{} ", lit)?;
+                    write!(wt, "{} ", lit.text())?;
                 }
                 write!(wt, "0 ")?;
                 for cid in db.retrieve_chain(*chain_addr) {
@@ -131,31 +131,31 @@ impl ForwardsProofInstruction {
             ForwardsProofInstruction::Wsr(id, pos, clause_addr, mchain_addr) => {
                 write!(wt, "w {} l {} ", id.text(), pos.text())?;
                 for lit in db.retrieve_clause(*clause_addr) {
-                    write!(wt, "{} ", lit)?;
+                    write!(wt, "{} ", lit.text())?;
                 }
                 write!(wt, "0 ")?;
                 let mchain = db.retrieve_multichain(*mchain_addr);
                 for (var, lit) in db.retrieve_witness(mchain.witness()) {
-                    write!(wt, "{} {} ", var, lit)?;
+                    write!(wt, "{} {} ", var.text(), lit.text())?;
                 }
                 write!(wt, "0 ")?;
                 for (lat, spec) in mchain {
                     if let Some(chain_addr) = spec {
                         if lat != id {
-                            write!(wt, "{} ", lat)?;
+                            write!(wt, "{} ", lat.text())?;
                         }
                         for cid in db.retrieve_chain(*chain_addr) {
-                            write!(wt, "{} ", cid)?;
+                            write!(wt, "{} ", cid.text())?;
                         }
                         write!(wt, "0 ")?;
                     } else {
-                        write!(wt, "{} d ", lat)?;
+                        write!(wt, "{} d ", lat.text())?;
                     }
                 }
                 write!(wt, "0\n")?;
             },
             ForwardsProofInstruction::Del(id, pos) => {
-                write!(wt, "d {} l {} ", id.text(), pos.text())?;
+                write!(wt, "d {} l {} \n", id.text(), pos.text())?;
             },
         }
         Ok(())

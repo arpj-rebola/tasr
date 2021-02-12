@@ -108,25 +108,25 @@ impl TempFiles {
         })
     }
 }
-// impl Drop for TempFiles {
-//     fn drop(&mut self) {
-//         for path in &self.split {
-//             if path.exists() {
-//                 fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
-//             }
-//         }
-//         for path in &self.trimmed {
-//             if path.exists() {
-//                 fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
-//             }
-//         }
-//         if let Some(path) = &self.core {
-//             if path.exists() {
-//                 fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
-//             }
-//         }
-//     }
-// }
+impl Drop for TempFiles {
+    fn drop(&mut self) {
+        for path in &self.split {
+            if path.exists() {
+                fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
+            }
+        }
+        for path in &self.trimmed {
+            if path.exists() {
+                fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
+            }
+        }
+        if let Some(path) = &self.core {
+            if path.exists() {
+                fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
+            }
+        }
+    }
+}
 
 pub struct SplitTempFiles<'a> {
     temp: &'a mut TempFiles

@@ -157,9 +157,9 @@ impl Trimmer {
     fn process_cores<W: Write>(&mut self, wt: &mut W) -> IoResult<()> {
         for (id, ((pos, clause_addr), flags)) in self.idflags.clauses() {
             if flags.has_check_schedule() {
-                write!(wt, "k {} l {} ", id, pos)?;
+                write!(wt, "k {} l {} ", id.text(), pos.text())?;
                 for &lit in self.db.retrieve_clause(*clause_addr) {
-                    write!(wt, "{} ", lit)?;
+                    write!(wt, "{} ", lit.text())?;
                 }
                 write!(wt, "0\n")?;
                 self.stats.new_core();

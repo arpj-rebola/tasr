@@ -21,7 +21,7 @@ use crate::{
 pub enum CorrectnessError {
     IncorrectCore(DeferredPosition, ClauseIndex, InstructionNumber, Vec<Literal>),
     IncorrectRupChain(DeferredPosition, ClauseIndex, InstructionNumber, Vec<Literal>, PropagationError),
-    IncorrectWsrChain(DeferredPosition, ClauseIndex, InstructionNumber, Vec<Literal>, Vec<(Variable, Literal)>, ClauseIndex, PropagationError),
+    IncorrectWsrChain(DeferredPosition, ClauseIndex, InstructionNumber, Vec<Literal>, Vec<(Variable, Literal)>, ClauseIndex, Vec<Literal>, PropagationError),
 }
 impl CorrectnessError {
     pub fn show(&self) {
@@ -73,11 +73,11 @@ impl CorrectnessError {
                     }
                 });
             },
-            CorrectnessError::IncorrectWsrChain(pos, id, num, clause, witness, lat, pe) if serious => {
+            CorrectnessError::IncorrectWsrChain(pos, id, num, clause, witness, lat, lclause, pe) if serious => {
                 error!("incorrect WSR inference" @ pos, lock, {
                     append!(lock, "The WSR inference {} with clause identifier {} is introduced in {}", DisplayClause(&clause), id, num);
                     append!(lock, " through the witness {}. ", DisplaySubstitution(&witness));
-                    append!(lock, "The following RUP chain is given for the lateral clause with clause identifier {}:", lat);
+                    append!(lock, "The following RUP chain is given for the lateral clause {} with clause identifier {}:", DisplayClause(&lclause), lat);
                     breakline!(lock);
                     append!(lock, "  assumptions: {}", DisplayLiteralCsv(pe.assumptions()));
                     for (cid, cls, res) in pe.propagations() {
@@ -93,11 +93,11 @@ impl CorrectnessError {
                     }
                 });
             },
-            CorrectnessError::IncorrectWsrChain(pos, id, num, clause, witness, lat, pe) => {
+            CorrectnessError::IncorrectWsrChain(pos, id, num, clause, witness, lat, lclause, pe) => {
                 warning!("incorrect WSR inference" @ pos, lock, {
                     append!(lock, "The WSR inference {} with clause identifier {} is introduced in {}", DisplayClause(&clause), id, num);
                     append!(lock, " through the witness {}. ", DisplaySubstitution(&witness));
-                    append!(lock, "The following RUP chain is given for the lateral clause with clause identifier {}:", lat);
+                    append!(lock, "The following RUP chain is given for the lateral clause {} with clause identifier {}:", DisplayClause(&lclause), lat);
                     breakline!(lock);
                     append!(lock, "  assumptions: {}", DisplayLiteralCsv(pe.assumptions()));
                     for (cid, cls, res) in pe.propagations() {
@@ -119,7 +119,7 @@ impl CorrectnessError {
         match self {
             CorrectnessError::IncorrectCore(_, _, _, _) => true,
             CorrectnessError::IncorrectRupChain(_, _, _, _, pe) => pe.is_serious(),
-            CorrectnessError::IncorrectWsrChain(_, _, _, _, _, _, pe) => pe.is_serious(),
+            CorrectnessError::IncorrectWsrChain(_, _, _, _, _, _, _, pe) => pe.is_serious(),
         }
     }
 }
@@ -128,6 +128,7 @@ pub struct CorrectnessConfig {
     pub select: u64,
     pub parts: u64,
     pub insertions: Vec<u64>,
+    pub permissive: bool,
 }
 impl CorrectnessConfig {
     fn lower(&self, total: u64) -> u64 {
@@ -171,6 +172,7 @@ impl CorrectnessStats {
         self.processed += 1u64;
     }
     fn log_error(&mut self, err: CorrectnessError) {
+        err.show();
         if err.is_serious() {
             self.errors.push(err);
         } else {
@@ -261,7 +263,7 @@ impl CorrectnessChecker {
         }
     }
     fn check_asr_proof(&mut self, asr: &mut TextAsrParser<'_>) {
-        self.current = InstructionNumber::new_core();
+        self.current = InstructionNumber::new_proof();
         asr.parse_proof_header();
         if !self.must_finish() {
             while let Some(ins) = asr.parse_instruction(false, true) {
@@ -316,7 +318,7 @@ impl CorrectnessChecker {
             let res = {
                 let central = self.db.retrieve_clause(addr.unwrap());
                 let mut checker = self.prop.rup_check(central);
-                checker.check_chain(Some(self.chain.chain()), &self.db, &self.formula)
+                checker.check_chain(Some(self.chain.chain()), &self.db, &self.formula, self.config.permissive)
             };
             if !res {
                 self.incorrect_rup(ins, addr.unwrap());
@@ -366,7 +368,7 @@ impl CorrectnessChecker {
                     let laddr = self.formula.get(lid).unwrap();
                     let lateral = self.db.retrieve_clause(laddr);
                     let mut subchecker = checker.rup_check(lateral, &self.subst);
-                    if !subchecker.check_chain(opt_chain, &self.db, &self.formula) {
+                    if !subchecker.check_chain(opt_chain, &self.db, &self.formula, self.config.permissive) {
                         self.laterals.push(lid);
                     }
                 }
@@ -462,7 +464,9 @@ impl CorrectnessChecker {
             checker.check_chain(self.chain.spec(lid).unwrap(), &self.db, &self.formula);
             let pe = checker.extract_propagations();
             let pos = ins.position(&self.original, &self.deferred);
-            self.stats.log_error(CorrectnessError::IncorrectWsrChain(pos, *ins.index(), self.current, clause.into_iter().copied().collect(), witness, lid, pe));
+            let clausevec = clause.into_iter().copied().collect();
+            let lateralvec = lateral.into_iter().copied().collect();
+            self.stats.log_error(CorrectnessError::IncorrectWsrChain(pos, *ins.index(), self.current, clausevec, witness, lid, lateralvec, pe));
         }
     }
 }

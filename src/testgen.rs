@@ -1,10 +1,11 @@
 use std::{
     convert::{TryFrom},
     fmt::{Display, Formatter, Result as FmtResult, Debug},
+    mem::{self},
 };
 
 use crate::{
-    basic::{Literal, Variable, ClauseIndex, MaybeClauseIndex}
+    basic::{Literal, Variable, ClauseIndex}
 };
 
 pub enum DisplayInstruction {
@@ -69,11 +70,12 @@ impl Display for DisplayInstruction {
 
 pub struct PigeonHole {
     n: usize,
+    orig: usize,
     proof: Vec<DisplayInstruction>,
     somes: Vec<ClauseIndex>,
     ones: Vec<Vec<Vec<Option<ClauseIndex>>>>,
     lemmas: Vec<ClauseIndex>,
-    next: MaybeClauseIndex,
+    next: u64,
 }
 impl PigeonHole {
     pub fn new(n: usize) -> PigeonHole {
@@ -91,11 +93,12 @@ impl PigeonHole {
         }
         let mut ph = PigeonHole {
             n: n,
+            orig: n,
             proof: Vec::new(),
             somes: Vec::new(),
             lemmas: Vec::new(),
             ones: vec1,
-            next: MaybeClauseIndex::new(None),
+            next: 0u64,
         };
         for i in 0 .. (ph.n + 1) {
             let cls = ph.some_hole_clause(i);
@@ -119,14 +122,14 @@ impl PigeonHole {
         ph
     }
     fn next_index(&mut self) -> ClauseIndex {
-        self.next = unsafe { self.next.succ() };
-        self.next.get().unwrap()
+        self.next += 1u64;
+        unsafe { mem::transmute::<u64, ClauseIndex>(self.next) }
     }
     fn variable(&self, i: usize, j: usize) -> Variable {
-        Variable::try_from(((i + j * (self.n + 1usize)) + 1usize) as i64).unwrap()
+        Variable::try_from(((i + j * (self.orig + 1usize)) + 1usize) as i64).unwrap()
     }
     fn literal(&self, i: usize, j: usize) -> Literal {
-        Literal::try_from(((i + j * (self.n + 1usize)) + 1usize) as i64).unwrap()
+        Literal::try_from(((i + j * (self.orig + 1usize)) + 1usize) as i64).unwrap()
     }
     fn some_hole_clause(&self, i: usize) -> Vec<Literal> {
         let mut vec = Vec::new();
@@ -162,7 +165,7 @@ impl PigeonHole {
                 Some(vec![unsafe { self.ones.get_unchecked(i).get_unchecked(self.n).get_unchecked(k).unwrap() }])));
         }
         vec.push((*unsafe { self.somes.get_unchecked(i) }, Some(vec![*unsafe { self.somes.get_unchecked(self.n) }])));
-        vec.push((*unsafe { self.somes.get_unchecked(self.n) }, Some(vec![*unsafe { self.somes.get_unchecked(i) }])));
+        // vec.push((*unsafe { self.somes.get_unchecked(self.n) }, Some(vec![*unsafe { self.somes.get_unchecked(i) }])));
         vec
     }
     fn reduction_chain_deleted(&self, i: usize, id: ClauseIndex) -> Vec<(ClauseIndex, Option<Vec<ClauseIndex>>)> {
@@ -180,7 +183,7 @@ impl PigeonHole {
             vec.push((unsafe { self.ones.get_unchecked(i).get_unchecked(self.n).get_unchecked(k).unwrap() }, None));
         }
         vec.push((*unsafe { self.somes.get_unchecked(i) }, Some(vec![*unsafe { self.somes.get_unchecked(self.n) }])));
-        vec.push((*unsafe { self.somes.get_unchecked(self.n) }, Some(vec![*unsafe { self.somes.get_unchecked(i) }])));
+        // vec.push((*unsafe { self.somes.get_unchecked(self.n) }, Some(vec![*unsafe { self.somes.get_unchecked(i) }])));
         vec
     }
     fn reduce(&mut self) -> Option<()> {
@@ -201,7 +204,7 @@ impl PigeonHole {
                 self.lemmas.push(id);
             }
             self.n -= 1usize;
-            for i in 0 .. self.n {
+            for i in 0 .. self.n + 1usize {
                 let id = self.next_index();
                 let clause = self.some_hole_clause(i);
                 let chain = vec![*unsafe { self.lemmas.get_unchecked(i) }, *unsafe { self.somes.get_unchecked(i) }];

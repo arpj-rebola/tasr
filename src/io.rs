@@ -392,6 +392,12 @@ macro_rules! create_message {
             |msg| ::colored::Colorize::bold(msg), $title,
             $pos, $lock, $block, |_| ())
     }};
+    (progress @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
+        headed_message!(|lock| $crate::io::MainOutput.maybe_err(lock),
+            |msg| ::colored::Colorize::bold(::colored::Colorize::blue(msg)), "Progress:",
+            |msg| ::colored::Colorize::bold(msg), $title,
+            $pos, $lock, $block, |_| ())
+    }};
 }
 
 #[macro_export]
@@ -453,6 +459,17 @@ macro_rules! success {
         create_message!(success @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
     };
 }
+
+#[macro_export]
+macro_rules! progress {
+    ($title: literal @ $pos: expr, $lock: ident, $block: block) => {
+        create_message!(progress @ $title, Some(&$pos), $lock, $block)
+    };
+    ($title: literal, $lock: ident, $block: block) => {
+        create_message!(progress @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
+    };
+}
+
 
 #[cfg(test)]
 pub mod test {

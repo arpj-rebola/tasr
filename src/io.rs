@@ -387,13 +387,13 @@ macro_rules! create_message {
             $pos, $lock, $block, |_| ())
     }};
     (success @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
-        headed_message!(|lock| $crate::io::MainOutput.maybe_err(lock),
+        headed_message!(|lock| $crate::io::MainOutput.maybe_out(lock),
             |msg| ::colored::Colorize::bold(::colored::Colorize::green(msg)), "Success:",
             |msg| ::colored::Colorize::bold(msg), $title,
             $pos, $lock, $block, |_| ())
     }};
     (progress @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
-        headed_message!(|lock| $crate::io::MainOutput.maybe_err(lock),
+        headed_message!(|lock| $crate::io::MainOutput.maybe_out(lock),
             |msg| ::colored::Colorize::bold(::colored::Colorize::blue(msg)), "Progress:",
             |msg| ::colored::Colorize::bold(msg), $title,
             $pos, $lock, $block, |_| ())

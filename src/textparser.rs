@@ -203,7 +203,7 @@ impl<'a> TextAsrParser<'a> {
         ln
     }
     pub fn save_core_instruction<W: Write>(&mut self, id: ClauseIndex, fp: FilePosition, output: &mut W) -> IoResult<()> {
-        write!(output, "k {} {} ", id.text(), fp.text())?;
+        write!(output, "k {} l {} ", id.text(), fp.text())?;
         let mut clause_ps = self.parse_clause();
         while let Some(lit) = clause_ps.next() {
             write!(output, "{} ", lit.text())?;
@@ -211,7 +211,7 @@ impl<'a> TextAsrParser<'a> {
         write!(output, "0\n")
     }
     pub fn save_rup_instruction<W: Write>(&mut self, id: ClauseIndex, fp: FilePosition, output: &mut W) -> IoResult<()> {
-        write!(output, "r {} {} ", id.text(), fp.text())?;
+        write!(output, "r {} l {} ", id.text(), fp.text())?;
         {
             let mut clause_ps = self.parse_clause();
             while let Some(lit) = clause_ps.next() {
@@ -228,7 +228,7 @@ impl<'a> TextAsrParser<'a> {
         write!(output, "0\n")
     }
     pub fn save_wsr_instruction<W: Write>(&mut self, id: ClauseIndex, fp: FilePosition, output: &mut W) -> IoResult<()> {
-        write!(output, "w {} {} ", id.text(), fp.text())?;
+        write!(output, "w {} l {} ", id.text(), fp.text())?;
         {
             let mut clause_ps = self.parse_clause();
             while let Some(lit) = clause_ps.next() {
@@ -263,7 +263,7 @@ impl<'a> TextAsrParser<'a> {
         write!(output, "0\n")
     }
     pub fn save_del_instruction<W: Write>(&mut self, id: ClauseIndex, fp: FilePosition, output: &mut W) -> IoResult<()> {
-        write!(output, "d {} {}\n", id.text(), fp.text())
+        write!(output, "d {} l {}\n", id.text(), fp.text())
     }
     fn peek_number_variables(&mut self, expect: &'static str) -> Result<u32, i64> {
         match self.peek() {
@@ -438,12 +438,12 @@ impl<'a> TextAsrParser<'a> {
         self.cache = Some(Lexeme::Quote);
     }
     fn invalid_input(&mut self, c: u8) -> ! {
-        panick!("invalid input" @ self.position, lock, {
+        panick!("invalid input" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Could not recognize character '{}'.", c as char);
         })
     }
     fn invalid_escape(&mut self, s: Option<u8>) {
-        panick!("invalid escape" @ self.position, lock, {
+        panick!("invalid escape" @ self.position.with_path(self.input.path()), lock, {
             match s {
                 Some(c) => append!(lock, "Invalid escaped character '\\{}'.", c as char),
                 None => append!(lock, "Unfinished escaped character."),
@@ -451,7 +451,7 @@ impl<'a> TextAsrParser<'a> {
         })
     }
     fn invalid_unicode_escape(&mut self, s: Option<u32>) {
-        panick!("invalid unicode escape" @ self.position, lock, {
+        panick!("invalid unicode escape" @ self.position.with_path(self.input.path()), lock, {
             match s {
                 Some(c) => append!(lock, "Invalid escaped Unicode character with code {:#X}.", c),
                 None => append!(lock, "Unfinished escaped Unicode character."),
@@ -459,117 +459,117 @@ impl<'a> TextAsrParser<'a> {
         })
     }
     fn invalid_quote(&mut self) {
-        panick!("invalid quoted string" @ self.position, lock, {
+        panick!("invalid quoted string" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Unclosed quoted string.");
         })
     }
     fn out_of_range_integer(&mut self) -> ! {
-        panick!("out-of-range integer" @ self.position, lock, {
+        panick!("out-of-range integer" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Parsed a number outside of the 64-bit signed range [{}..{}].", i64::min_value(), i64::max_value());
         })
     }
     fn out_of_range_header(&mut self) -> ! {
-        panick!("out-of-range header" @ self.position, lock, {
+        panick!("out-of-range header" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Parsed a header longer than 8 characters.");
         })
     }
     fn not_a_number(&mut self) -> ! {
-        panick!("invalid integer" @ self.position, lock, {
+        panick!("invalid integer" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Could not parse an integer.");
         })
     }
     fn not_a_letter(&mut self) -> ! {
-        panick!("invalid letter" @ self.position, lock, {
+        panick!("invalid letter" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Could not parse a letter.");
         })
     }
     fn not_a_header(&mut self) -> ! {
-        panick!("invalid header" @ self.position, lock, {
+        panick!("invalid header" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Could not parse a 'p' header.");
         })
     }
     fn expected_header(&mut self, expect: &'static str) -> ! {
-        panick!("expected header" @ self.position, lock, {
+        panick!("expected header" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "{}", expect);
         })
     }
     fn expected_quote(&mut self) -> ! {
-        panick!("expected text literal" @ self.position, lock, {
+        panick!("expected text literal" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "expected a text literal starting with '\"'.");
         })
     }
     fn expected_instruction(&mut self, expect: &'static str) -> ! {
-        panick!("expected instruction" @ self.position, lock, {
+        panick!("expected instruction" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "{}", expect);
         })
     }
     fn expected_file_position(&mut self) -> ! {
-        panick!("expected file position" @ self.position, lock, {
+        panick!("expected file position" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Expected a file position.");
         })
     }
     fn expected_literal(&mut self, expect: &'static str) -> ! {
-        panick!("expected literal" @ self.position, lock, {
+        panick!("expected literal" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "{}", expect);
         })
     }
     fn expected_variable(&mut self, expect: &'static str) -> ! {
-        panick!("expected variable" @ self.position, lock, {
+        panick!("expected variable" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "{}", expect);
         })
     }
     fn expected_number_variables(&mut self, expect: &'static str) -> ! {
-        panick!("expected number of variables" @ self.position, lock, {
+        panick!("expected number of variables" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "{}", expect);
         })
     }
     fn expected_number_clauses(&mut self, expect: &'static str) -> ! {
-        panick!("expected number of clauses" @ self.position, lock, {
+        panick!("expected number of clauses" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "{}", expect);
         })
     }
     fn expected_number_instructions(&mut self, expect: &'static str) -> ! {
-        panick!("expected number of core and proof instructions" @ self.position, lock, {
+        panick!("expected number of core and proof instructions" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "{}", expect);
         })
     }
     fn expected_id(&mut self, expect: &'static str) -> ! {
-        panick!("expected clause identifier" @ self.position, lock, {
+        panick!("expected clause identifier" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "{}", expect);
         })
     }
     fn expected_index_element(&mut self, expect: &'static str) -> ! {
-        panick!("expected index element" @ self.position, lock, {
+        panick!("expected index element" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "{}", expect);
         })
     }
     fn out_of_range_literal(&mut self, num: i64) -> ! {
-        panick!("out-of-range literal" @ self.position, lock, {
+        panick!("out-of-range literal" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Parsed a literal {} outside of the range [{}..{}] U [{}..{}].", num, -Literal::MaxValue, -1i64, 1i64, Literal::MaxValue);
         })
     }
     fn out_of_range_variable(&mut self, num: i64) -> ! {
-        panick!("out-of-range variable" @ self.position, lock, {
+        panick!("out-of-range variable" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Parsed a variable {} outside of the range [{}..{}].", num, 1i64, Variable::MaxValue);
         })
     }
     fn out_of_range_index(&mut self, num: i64) -> ! {
-        panick!("out-of-range clause identifier" @ self.position, lock, {
+        panick!("out-of-range clause identifier" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Parsed a clause identifier {} outside of the range [{}..{}].", num, 1i64, ClauseIndex::MaxValue);
         })
     }
     fn out_of_range_number_variables(&mut self, num: i64) -> ! {
-        panick!("out-of-range number of variables" @ self.position, lock, {
+        panick!("out-of-range number of variables" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Parsed a number of variables {} outside of the range [{}..{}].", num, 0i64, Variable::MaxValue);
         })
     }
     fn out_of_range_number_clauses(&mut self, num: i64) -> ! {
-        panick!("out-of-range number of clauses" @ self.position, lock, {
+        panick!("out-of-range number of clauses" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Parsed a number of clauses {} outside of the range [{}..{}].", num, 0usize, u64::max_value());
         })
     }
     fn out_of_range_number_instructions(&mut self, num: i64) -> ! {
-        panick!("out-of-range number of instructions" @ self.position, lock, {
+        panick!("out-of-range number of instructions" @ self.position.with_path(self.input.path()), lock, {
             append!(lock, "Parsed a number of core and proof instructions {} outside of the range [{}..{}].", num, 0usize, u64::max_value());
         })
     }

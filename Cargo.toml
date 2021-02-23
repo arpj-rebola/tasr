@@ -5,11 +5,19 @@ authors = ["Adrian Rebola-Pardo <arpj.rebola@gmail.com>"]
 edition = "2018"
 description = "ASR proof checker for SAT solving"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 either = "1.5.3"
 rand = "0.7"
 clap = "2.33.1"
 colored = "1.9.3"
 lazy_static = "1.4.0"
+
+[profile.release]
+opt-level = 3
+debug = 0
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "unwind"
+incremental = false
+codegen-units = 1

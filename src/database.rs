@@ -30,7 +30,7 @@ impl Database {
     const StorageSize: usize = Database::MaximumRecordSize << 8;
     const MaximumRecordSize: usize = 1usize << Database::NumberOfBuckets;
     const MaximumAllocableSliceSize: usize = Database::MaximumRecordSize - 2usize;
-    const NumberOfBuckets: usize = 16usize;
+    const NumberOfBuckets: usize = 20usize;
     const MaximumBucket: usize = Database::NumberOfBuckets - 1usize;
     const AllocationThreshold: usize = Database::MaximumRecordSize << 4;
     pub fn new() -> Database {

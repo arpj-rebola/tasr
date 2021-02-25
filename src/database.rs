@@ -501,5 +501,4 @@ pub mod test {
             assert!(size == Database::StorageSize * db.ptrs.len());
         }
     }
-
 }

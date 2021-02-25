@@ -69,7 +69,7 @@ impl ClauseSet {
     const Width: usize = (1usize << 16) - 1usize;
     pub fn new() -> ClauseSet {
         let mut table = Vec::with_capacity(ClauseSet::Width + 1usize);
-        table.resize_with(ClauseSet::Width, || Vec::with_capacity(4usize));
+        table.resize_with(ClauseSet::Width + 1usize, || Vec::with_capacity(4usize));
         ClauseSet {
             table: table,
             model: Model::new(),

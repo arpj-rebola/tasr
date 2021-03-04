@@ -47,6 +47,33 @@ impl From<ModelValue> for ModelMembership {
     }
 }
 
+// pub struct Model {
+//     vec: Vec<u8>
+// }
+// impl Model {
+//     pub fn new() -> Model {
+//         Model { vec: Vec::new() }
+//     }
+//     pub unsafe fn value(&self, lit: Literal) -> ModelValue {
+//         let index = lit.index();
+//         let val = self.vec.get(index >> 1).unwrap_or(0u8);
+//         mem::transmute::<u8, ModelValue>(val ^ (0b11u8 * ((index as u8) & 1u8)))
+//     }
+//     pub fn member(&self, lit: Literal) -> ModelMembership {
+//         let index = lit.index();
+//         let val = self.vec.get(index >> 1).unwrap_or(0u8);
+//         mem::transmute::<u8, ModelValue>(val ^ (0b11u8 * ((index as u8) & 1u8)))
+//         let index = lit.index();
+//         match self.vec.get(index >> 3) {
+//             Some(chunk) => {
+//                 let val = Model::get_value(chunk, index);
+//                 unsafe { mem::transmute::<u8, ModelMembership>(val) }
+//             },
+//             None => ModelMembership::Unassigned,
+//         }
+//     }
+// }
+
 pub struct Model {
     vec: Vec<u8>,
 }
@@ -157,8 +184,8 @@ pub mod test {
     };
     use rand::{self, Rng};
 	use crate::{
-        basic::{Literal, ClauseIndex, test::{generate_literal, generate_external_literal, generate_index}},
-        model::{Model, ModelMembership, ModelValue},
+        basic::{Literal, test::{generate_literal,}},
+        model::{Model, ModelMembership},
     };
 
     #[test]

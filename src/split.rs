@@ -1,6 +1,6 @@
 use std::{
     path::{Path},
-    io::{Write},
+    io::{Write, Read},
     time::{Instant, Duration},
 };
 
@@ -113,7 +113,7 @@ impl SplitterBase {
             stats: PreprocessingStats::new(),
         }
     }
-    fn process_core(&mut self, asr: &mut TextAsrParser<'_>, buffer: &mut Vec<u8>) {
+    fn process_core<R: Read>(&mut self, asr: &mut TextAsrParser<R>, buffer: &mut Vec<u8>) {
         asr.parse_core_header();
         self.current = InstructionNumber::new_premise();
         while let Some(ins) = asr.parse_instruction(true, true) {
@@ -128,7 +128,7 @@ impl SplitterBase {
             }
         }
     }
-    fn process_proof_chunk(&mut self, asr: &mut TextAsrParser) -> Option<()> {
+    fn process_proof_chunk<R: Read>(&mut self, asr: &mut TextAsrParser<R>) -> Option<()> {
         while let Some(ins) = asr.parse_instruction(false, true) {
             match ins.kind() {
                 PrepParsedInstructionKind::Rup => self.process_rup_instruction(asr, &ins),
@@ -147,12 +147,12 @@ impl SplitterBase {
         }
         None
     }
-    fn process_core_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+    fn process_core_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
         let oid = *ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
         self.idmap.map(oid, clause_addr, ins.default_position()).unwrap();
     }
-    fn process_rup_instruction(&mut self, asr: &mut TextAsrParser, ins: &PrepParsedInstruction) {
+    fn process_rup_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
         let oid = *ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
         let pos = ins.default_position();
@@ -160,7 +160,7 @@ impl SplitterBase {
         let chain_addr = self.process_chain(asr.parse_chain());
         self.proof.insert_rup(nid, pos, chain_addr);
     }
-    fn process_wsr_instruction(&mut self, asr: &mut TextAsrParser, ins: &PrepParsedInstruction) {
+    fn process_wsr_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
         let oid = *ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
         let pos = ins.default_position();
@@ -174,12 +174,12 @@ impl SplitterBase {
         }
         self.dels.clear();
     }
-    fn process_del_instruction(&mut self, _: &mut TextAsrParser, ins: &PrepParsedInstruction) {
+    fn process_del_instruction<R: Read>(&mut self, _: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
         let oid = *ins.index();
         let (nid, addr, pos) = self.idmap.unmap(oid).unwrap();
         self.proof.insert_del(nid, pos, addr);
     }
-    fn process_clause(&mut self, mut ps: TextClauseParser<'_, '_>) -> ClauseAddress {
+    fn process_clause<R: Read>(&mut self, mut ps: TextClauseParser<'_, R>) -> ClauseAddress {
         while let Some(lit) = ps.next() {
             self.clause.push(lit);
         }
@@ -187,7 +187,7 @@ impl SplitterBase {
         self.clause.clear();
         addr
     }
-    fn process_chain(&mut self, mut ps: TextChainParser<'_, '_>) -> ChainAddress {
+    fn process_chain<R: Read>(&mut self, mut ps: TextChainParser<'_, R>) -> ChainAddress {
         while let Some(oid) = ps.next() {
             let nid = self.idmap.id(oid).unwrap();
             self.chain.push(nid);
@@ -196,7 +196,7 @@ impl SplitterBase {
         self.chain.clear();
         addr
     }
-    fn process_witness(&mut self, mut ps: TextWitnessParser<'_, '_>) -> WitnessAddress {
+    fn process_witness<R: Read>(&mut self, mut ps: TextWitnessParser<'_, R>) -> WitnessAddress {
         while let Some((var, lit)) = ps.next() {
             self.witness.push(var, lit);
         }
@@ -204,7 +204,7 @@ impl SplitterBase {
         self.witness.clear();
         addr
     }
-    fn process_multichain(&mut self, mut ps: TextMultichainParser<'_, '_>, witness: WitnessAddress) -> MultichainAddress {
+    fn process_multichain<R: Read>(&mut self, mut ps: TextMultichainParser<'_, R>, witness: WitnessAddress) -> MultichainAddress {
         self.mchain.set_witness(witness);
         while let Some((olat, spec)) = ps.next() {
             if let Some(chain_ps) = spec {
@@ -219,7 +219,7 @@ impl SplitterBase {
         self.mchain.clear();
         addr
     }
-    fn save_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction, buffer: &mut Vec<u8>) {
+    fn save_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction, buffer: &mut Vec<u8>) {
         let res = match ins.kind() {
             PrepParsedInstructionKind::Core => asr.save_core_instruction(*ins.index(), ins.default_position(), buffer),
             PrepParsedInstructionKind::Rup => asr.save_rup_instruction(*ins.index(), ins.default_position(), buffer),
@@ -251,23 +251,25 @@ impl SplitterBase {
     }
 }
 
-pub struct Splitter<'a, 'b> {
+pub struct Splitter<R: Read, S: Read> {
     base: SplitterBase,
-    asr: TextAsrParser<'a>,
-    buffer: Option<TextAsrParser<'b>>,
+    asr: TextAsrParser<R>,
+    buffer: Option<TextAsrParser<S>>,
 }
-impl<'a, 'b> Splitter<'a, 'b> {
-    pub fn new(config: SplitterConfig, mut asr: TextAsrParser<'a>, buffer: &'b mut Vec<u8>) -> Splitter<'a, 'b> {
+impl<R: Read> Splitter<R, &[u8]> {
+    pub fn new(config: SplitterConfig, mut asr: TextAsrParser<R>, buffer: &mut Vec<u8>) -> Splitter<R, &[u8]> {
         let mut base = SplitterBase::new(config);
         base.process_core(&mut asr, buffer);
         base.init_buffer();
         let buffer_ps = TextAsrParser::new(InputReader::new(&buffer[..], &Path::new("(buffer)"), false));
-        Splitter::<'_, '_> {
+        Splitter {
             base: base,
             asr: asr,
             buffer: Some(buffer_ps),
         }
     }
+}
+impl<R: Read, S: Read> Splitter<R, S> {
     pub fn next<'c>(&'c mut self) -> Option<SplitFragment<'c>> {
         if self.base.finished() {
             None

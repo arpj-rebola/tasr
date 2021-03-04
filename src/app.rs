@@ -1,6 +1,6 @@
 use std::{
     path::{PathBuf, Path},
-    io::{Error as IoError, Write},
+    io::{Error as IoError, Write, Read},
     fs::{OpenOptions},
     time::{Duration},
 };
@@ -183,10 +183,10 @@ impl PreprocessingConfig {
             end: self.data.take().unwrap().end,
         }
     }
-    fn open_input<'a>(path: &'a Path, binary: bool, kind: &str) -> TextAsrParser<'a> {
+    fn open_input<'a>(path: &'a Path, binary: bool, kind: &str) -> TextAsrParser<impl Read> {
         let file = OpenOptions::new().read(true).open(&path).unwrap_or_else(|err| PreprocessingConfig::opening_input_error(&path, err, kind));
         let input = InputReader::new(file, path, binary);
-        TextAsrParser::<'_>::new(input)
+        TextAsrParser::new(input)
     }
     fn opening_input_error(path: &Path, err: IoError, kind: &str) -> ! {
         panick!("unable to open input file", lock, {

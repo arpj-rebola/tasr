@@ -1,6 +1,6 @@
 use std::{
     mem::{self},
-    io::{Write, Result as IoResult},
+    io::{Write, Result as IoResult, Read},
 };
 
 use crate::{
@@ -44,7 +44,7 @@ impl Trimmer {
             stats: data.stats,
         }
     }
-    pub fn process(&mut self, mut asr: TextAsrParser<'_>) -> TrimmedFragment<'_> {
+    pub fn process<R: Read>(&mut self, mut asr: TextAsrParser<R>) -> TrimmedFragment<'_> {
         while let Some(ins) = asr.parse_instruction(false, true) {
             match ins.kind() {
                 PrepParsedInstructionKind::Rup => self.process_rup_instruction(&mut asr, &ins),
@@ -63,7 +63,7 @@ impl Trimmer {
         self.stats.record_trim_time();
         self.stats
     }
-    fn process_rup_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+    fn process_rup_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
         let id = *ins.index();
         let ((pos, clause_addr), flags) = self.idflags.take(id).unwrap();
         if flags.has_check_schedule() {
@@ -76,7 +76,7 @@ impl Trimmer {
             mem::drop(asr.parse_chain());
         }
     }
-    fn process_wsr_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+    fn process_wsr_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
         let id = *ins.index();
         if self.idflags.flags(id).unwrap().has_check_schedule() {
             let witness_addr = self.process_witness(asr.parse_witness());
@@ -101,13 +101,13 @@ impl Trimmer {
             mem::drop(asr.parse_multichain(id));
         }
     }
-    fn process_del_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+    fn process_del_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
         let id = ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
         let pos = ins.default_position();
         self.idflags.insert(*id, (pos, clause_addr)).unwrap();
     }
-    fn process_clause(&mut self, mut ps: TextClauseParser<'_, '_>) -> ClauseAddress {
+    fn process_clause<R: Read>(&mut self, mut ps: TextClauseParser<'_, R>) -> ClauseAddress {
         while let Some(lit) = ps.next() {
             self.clause.push(lit);
         }
@@ -115,7 +115,7 @@ impl Trimmer {
         self.clause.clear();
         addr
     }
-    fn process_chain(&mut self, mut ps: TextChainParser<'_, '_>) -> ChainAddress {
+    fn process_chain<R: Read>(&mut self, mut ps: TextChainParser<'_, R>) -> ChainAddress {
         while let Some(cid) = ps.next() {
             self.chain.push(cid);
             if !self.idflags.flags_mut(cid).unwrap().has_check_schedule() {
@@ -126,7 +126,7 @@ impl Trimmer {
         self.chain.clear();
         addr
     }
-    fn process_witness(&mut self, mut ps: TextWitnessParser<'_, '_>) -> WitnessAddress {
+    fn process_witness<R: Read>(&mut self, mut ps: TextWitnessParser<'_, R>) -> WitnessAddress {
         while let Some((var, lit)) = ps.next() {
             self.witness.push(var, lit);
         }

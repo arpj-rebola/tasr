@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Result as IoResult, BufReader, Write, BufWriter, Read, Stdout, Stderr, StderrLock, StdoutLock},
+    io::{self, Result as IoResult, BufReader, Write, BufWriter, Read, Stdout, Stderr, StderrLock, StdoutLock, Bytes},
     path::{PathBuf, Path},
     fmt::{self, Display, Result as FmtResult, Formatter, Arguments as FmtArguments},
     sync::{Mutex},
@@ -144,23 +144,22 @@ impl Display for DeferredPosition {
 }
 
 /// Manages a reader by buffering, panicking on errors and keeping track of file position.
-pub struct InputReader<'a> {
-    /// Iterator over the reader stream.
-    it: Box<dyn 'a + Iterator<Item = u8>>,
+pub struct InputReader<R> where R: Read {
+    it: Bytes<BufReader<R>>,
     /// File position of the last read item.
 	pos: PathFilePosition,
 }
-impl<'a> InputReader<'a> {
+impl<R> InputReader<R> where
+    R: Read
+{
     /// Creates a new instance from a reader.
-    pub fn new<'b: 'a, 'c: 'a, R>(reader: R, path: &Path, binary: bool) -> InputReader<'a> where
-        R: 'c + Read
-    {
-        let it = BufReader::new(reader).bytes();
-		InputReader::<'a> {
-			it: Box::new(it.map(|x| x.unwrap_or_else(|err| panic!(format!("{}", err)))).fuse()),
-			pos: PathFilePosition::new(path, binary),
-		}
+    pub fn new(reader: R, path: &Path, binary: bool) -> InputReader<R> {
+        InputReader {
+            it: BufReader::with_capacity(1usize << 20, reader).bytes(),
+            pos: PathFilePosition::new(path, binary),
+        }
     }
+    
     #[inline(always)]
     pub fn path(&self) -> &Path {
         self.pos.path()
@@ -174,16 +173,22 @@ impl<'a> InputReader<'a> {
         self.pos.binary()
     }
 }
-impl<'a> Iterator for InputReader<'a> {
+impl<R> Iterator for InputReader<R> where
+    R: Read
+{
 	type Item = u8;
 	fn next(&mut self) -> Option<u8> {
-        let res = self.it.next();
-        if let Some(c) = res {
-            self.pos.advance(c)
-        } else {
-            self.pos.finish()
+        match self.it.next() {
+            Some(Ok(c)) => {
+                self.pos.advance(c);
+                Some(c)
+            }
+            None => {
+                self.pos.finish();
+                None
+            },
+            Some(Err(err)) => panic!(format!("{}", err)),
         }
-		res
 	}
 }
 

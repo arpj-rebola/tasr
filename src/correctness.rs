@@ -2,6 +2,7 @@ use std::{
     path::{PathBuf},
     mem::{self},
     time::{Instant, Duration},
+    io::{Read},
 };
 
 use crate::{
@@ -220,7 +221,7 @@ impl CorrectnessChecker {
             deferred: PathBuf::from("(unknown)"),
         }
     }
-    pub fn check(mut self, mut cnf: TextAsrParser<'_>, mut asr: TextAsrParser<'_>) -> CorrectnessStats {
+    pub fn check<R: Read, S: Read>(mut self, mut cnf: TextAsrParser<R>, mut asr: TextAsrParser<S>) -> CorrectnessStats {
         self.original = asr.path().to_path_buf();
         self.deferred = if let Some((_, src)) = asr.parse_source_header() {
             src
@@ -240,14 +241,14 @@ impl CorrectnessChecker {
         self.stats.record_check_time();
         self.stats
     }
-    fn load_cnf_formula(&mut self, set: &mut ClauseSet, cnf: &mut TextAsrParser<'_>) {
+    fn load_cnf_formula<R: Read>(&mut self, set: &mut ClauseSet, cnf: &mut TextAsrParser<R>) {
         cnf.parse_cnf_header();
         while let Some(_) = cnf.parse_premise() {
             let addr = self.parse_clause(cnf.parse_clause());
             set.insert(&self.db, addr);
         }
     }
-    fn check_asr_core(&mut self, set: &mut ClauseSet, asr: &mut TextAsrParser<'_>) {
+    fn check_asr_core<R: Read>(&mut self, set: &mut ClauseSet, asr: &mut TextAsrParser<R>) {
         self.current = InstructionNumber::new_core();
         asr.parse_core_header();
         if !self.must_finish() {
@@ -262,7 +263,7 @@ impl CorrectnessChecker {
             }
         }
     }
-    fn check_asr_proof(&mut self, asr: &mut TextAsrParser<'_>) {
+    fn check_asr_proof<R: Read>(&mut self, asr: &mut TextAsrParser<R>) {
         self.current = InstructionNumber::new_proof();
         asr.parse_proof_header();
         if !self.must_finish() {
@@ -279,7 +280,7 @@ impl CorrectnessChecker {
             }
         }
     }
-    fn process_asr_core_instruction(&mut self, asr: &mut TextAsrParser<'_>, set: &mut ClauseSet, ins: &PrepParsedInstruction) {
+    fn process_asr_core_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, set: &mut ClauseSet, ins: &PrepParsedInstruction) {
         self.next_instruction();
         let insert = self.must_insert();
         let check = self.must_check();
@@ -295,7 +296,7 @@ impl CorrectnessChecker {
             mem::drop(clause_ps);
         }
     }
-    fn process_rup_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+    fn process_rup_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
         self.next_instruction();
         let insert = self.must_insert();
         let check = self.must_check();
@@ -328,7 +329,7 @@ impl CorrectnessChecker {
             mem::drop(chain_ps);
         }
     }
-    fn process_wsr_instruction(&mut self, asr: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+    fn process_wsr_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
         self.next_instruction();
         let insert = self.must_insert();
         let check = self.must_check();
@@ -389,7 +390,7 @@ impl CorrectnessChecker {
             mem::drop(asr.parse_chain());
         }
     }
-    fn process_del_instruction(&mut self, _: &mut TextAsrParser<'_>, ins: &PrepParsedInstruction) {
+    fn process_del_instruction<R: Read>(&mut self, _: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
         self.next_instruction();
         if self.must_check() {
             self.stats.new_processed();
@@ -397,7 +398,7 @@ impl CorrectnessChecker {
             self.db.deallocate_clause(addr);
         }
     }
-    fn check_core_instruction(&mut self, set: &mut ClauseSet, mut ps: TextClauseParser<'_, '_>, ins: &PrepParsedInstruction) -> ClauseAddress {
+    fn check_core_instruction<R: Read>(&mut self, set: &mut ClauseSet, mut ps: TextClauseParser<'_, R>, ins: &PrepParsedInstruction) -> ClauseAddress {
         self.stats.new_processed();
         while let Some(lit) = ps.next() {
             self.clause.push(lit);
@@ -413,7 +414,7 @@ impl CorrectnessChecker {
         self.clause.clear();
         addr
     }
-    fn parse_clause(&mut self, mut ps: TextClauseParser<'_, '_>) -> ClauseAddress {
+    fn parse_clause<R: Read>(&mut self, mut ps: TextClauseParser<'_, R>) -> ClauseAddress {
         while let Some(lit) = ps.next() {
             self.clause.push(lit);
         }

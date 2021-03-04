@@ -1,6 +1,6 @@
 use std::{
     convert::{TryFrom},
-    io::{Write, Result as IoResult},
+    io::{Write, Result as IoResult, Read},
     mem::{self},
     path::{PathBuf, Path},
     char::{self},
@@ -63,16 +63,20 @@ impl PrepParsedInstruction {
     }
 }
 
-pub struct TextAsrParser<'a> {
-    input: InputReader<'a>,
+pub struct TextAsrParser<R> where
+    R: Read
+{
+    input: InputReader<R>,
     position: FilePosition,
     cache: Option<Lexeme>,
     quote: String,
 }
-impl<'a> TextAsrParser<'a> {
-    pub fn new(input: InputReader<'a>) -> TextAsrParser<'a> {
+impl<R> TextAsrParser<R> where
+    R: Read
+{
+    pub fn new(input: InputReader<R>) -> TextAsrParser<R> {
         let pos = input.position();
-        let mut parser = TextAsrParser::<'a> {
+        let mut parser = TextAsrParser::<R> {
             input: input,
             position: pos,
             cache: None,
@@ -81,17 +85,17 @@ impl<'a> TextAsrParser<'a> {
         parser.consume();
         parser
     }
-    pub fn parse_clause<'b>(&'b mut self) -> TextClauseParser<'a, 'b> {
-        TextClauseParser::<'a, 'b> { parser: Some(self) }
+    pub fn parse_clause<'b>(&'b mut self) -> TextClauseParser<'b, R> {
+        TextClauseParser::<'b, R> { parser: Some(self) }
     }
-    pub fn parse_witness<'b>(&'b mut self) -> TextWitnessParser<'a, 'b> {
-        TextWitnessParser::<'a, 'b> { parser: Some(self) }
+    pub fn parse_witness<'b>(&'b mut self) -> TextWitnessParser<'b, R> {
+        TextWitnessParser::<'b, R> { parser: Some(self) }
     }
-    pub fn parse_chain<'b>(&'b mut self) -> TextChainParser<'a, 'b> {
-        TextChainParser::<'a, 'b> { parser: Some(self) }
+    pub fn parse_chain<'b>(&'b mut self) -> TextChainParser<'b, R> {
+        TextChainParser::<'b, R> { parser: Some(self) }
     }
-    pub fn parse_multichain<'b>(&'b mut self,id: ClauseIndex) -> TextMultichainParser<'a, 'b> {
-        TextMultichainParser::<'a, 'b> { parser: Some(self), id: Some(id) }
+    pub fn parse_multichain<'b>(&'b mut self,id: ClauseIndex) -> TextMultichainParser<'b, R> {
+        TextMultichainParser::<'b, R> { parser: Some(self), id: Some(id) }
     }
     pub fn parse_cnf_header(&mut self) -> (FilePosition, u32, u64) {
         let pos = match self.peek() {
@@ -582,10 +586,14 @@ impl<'a> TextAsrParser<'a> {
 }
 
 #[repr(transparent)]
-pub struct TextClauseParser<'a, 'b> {
-    parser: Option<&'b mut TextAsrParser<'a>>,
+pub struct TextClauseParser<'b, R> where
+    R: Read
+{
+    parser: Option<&'b mut TextAsrParser<R>>,
 }
-impl<'a, 'b> TextClauseParser<'a, 'b> {
+impl<'b, R> TextClauseParser<'b, R> where
+    R: Read
+{
     pub fn next(&mut self) -> Option<Literal> {
         let ps = self.parser.take()?;
         let litopt = match ps.peek_literal("Expected literal or end-of-clause zero.") {
@@ -599,7 +607,9 @@ impl<'a, 'b> TextClauseParser<'a, 'b> {
         litopt
     }
 }
-impl<'a, 'b> Drop for TextClauseParser<'a, 'b> {
+impl<'b, R> Drop for TextClauseParser<'b, R> where
+    R: Read
+{
     fn drop(&mut self) {
         while let Some(_) = self.next() {
         }
@@ -607,10 +617,14 @@ impl<'a, 'b> Drop for TextClauseParser<'a, 'b> {
 }
 
 #[repr(transparent)]
-pub struct TextWitnessParser<'a, 'b> {
-    parser: Option<&'b mut TextAsrParser<'a>>,
+pub struct TextWitnessParser<'b, R> where
+    R: Read
+{
+    parser: Option<&'b mut TextAsrParser<R>>,
 }
-impl<'a, 'b> TextWitnessParser<'a, 'b> {
+impl<'b, R> TextWitnessParser<'b, R> where
+    R: Read
+{
     pub fn next(&mut self) -> Option<(Variable, Literal)> {
         let ps = self.parser.take()?;
         let pair = match ps.peek_variable("Expected variable or end-of-witness zero.") {
@@ -633,7 +647,9 @@ impl<'a, 'b> TextWitnessParser<'a, 'b> {
         Some((var, lit))
     }
 }
-impl<'a, 'b> Drop for TextWitnessParser<'a, 'b> {
+impl<'b, R> Drop for TextWitnessParser<'b, R> where
+    R: Read
+{
     fn drop(&mut self) {
         while let Some(_) = self.next() {
         }
@@ -641,10 +657,14 @@ impl<'a, 'b> Drop for TextWitnessParser<'a, 'b> {
 }
 
 #[repr(transparent)]
-pub struct TextChainParser<'a, 'b> {
-    parser: Option<&'b mut TextAsrParser<'a>>,
+pub struct TextChainParser<'b, R> where
+    R: Read
+{
+    parser: Option<&'b mut TextAsrParser<R>>,
 }
-impl<'a, 'b> TextChainParser<'a, 'b> {
+impl<'b, R> TextChainParser<'b, R> where
+    R: Read
+{
     pub fn next(&mut self) -> Option<ClauseIndex> {
         let ps = self.parser.take()?;
         let optid = match ps.peek_index("Expected clause identifier or end-of-chain zero.") {
@@ -658,19 +678,25 @@ impl<'a, 'b> TextChainParser<'a, 'b> {
         optid
     }
 }
-impl<'a, 'b> Drop for TextChainParser<'a, 'b> {
+impl<'b, R> Drop for TextChainParser<'b, R> where
+    R: Read
+{
     fn drop(&mut self) {
         while let Some(_) = self.next() {
         }
     }
 }
 
-pub struct TextMultichainParser<'a, 'b> {
-    parser: Option<&'b mut TextAsrParser<'a>>,
+pub struct TextMultichainParser<'b, R> where
+    R: Read
+{
+    parser: Option<&'b mut TextAsrParser<R>>,
     id: Option<ClauseIndex>,
 }
-impl<'a, 'b> TextMultichainParser<'a, 'b> {
-    pub fn next<'c>(&'c mut self) -> Option<(ClauseIndex, Option<TextChainParser<'a, 'c>>)> where 'b: 'c {
+impl<'b, R> TextMultichainParser<'b, R> where
+    R: Read
+{
+    pub fn next<'c>(&'c mut self) -> Option<(ClauseIndex, Option<TextChainParser<'c, R>>)> where 'b: 'c {
         let ps = self.parser.take()?;
         let (lid, del) = if self.id.is_none() {
             let optlid = match ps.peek_index("Expected lateral clause identifier.") {
@@ -694,11 +720,13 @@ impl<'a, 'b> TextMultichainParser<'a, 'b> {
         Some((lid, if del {
             None
         } else {
-            Some(TextChainParser::<'a, 'c> { parser: Some(&mut *self.parser.as_mut().unwrap()) })
+            Some(TextChainParser::<'c, R> { parser: Some(&mut *self.parser.as_mut().unwrap()) })
         }))
     }
 }
-impl<'a, 'b> Drop for TextMultichainParser<'a, 'b> {
+impl<'b, R> Drop for TextMultichainParser<'b, R> where
+    R: Read
+{
     fn drop(&mut self) {
         while let Some(_) = self.next() {
         }

@@ -1,6 +1,6 @@
 use std::{
     path::{Path},
-    io::{Write, Read},
+    io::{Write},
     time::{Instant, Duration},
 };
 
@@ -10,8 +10,9 @@ use crate::{
     idmap::{IndexMapping},
     buffer::{UncheckedClauseBuffer, UncheckedChainBuffer, UncheckedWitnessBuffer, UncheckedMultichainBuffer},
     basic::{InstructionNumber, ClauseIndex},
-    textparser::{TextAsrParser, TextClauseParser, TextChainParser, TextMultichainParser, TextWitnessParser, PrepParsedInstructionKind, PrepParsedInstruction},
-    proof::{BackwardsProof},
+    lexer::{AsrLexer, UnbufferedAsrBinaryLexer},
+    parser::{AsrParser, AsrClauseParser, AsrChainParser, AsrMultichainParser, AsrWitnessParser, ParsedInstructionKind, ParsedInstruction},
+    proof::{BackwardsProof, ProofBuffer},
 };
 
 pub struct SplitterConfig {
@@ -113,12 +114,12 @@ impl SplitterBase {
             stats: PreprocessingStats::new(),
         }
     }
-    fn process_core<R: Read>(&mut self, asr: &mut TextAsrParser<R>, buffer: &mut Vec<u8>) {
+    fn process_core<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, buffer: &mut ProofBuffer) {
         asr.parse_core_header();
         self.current = InstructionNumber::new_premise();
         while let Some(ins) = asr.parse_instruction(true, true) {
             match ins.kind() {
-                PrepParsedInstructionKind::Core => self.process_core_instruction(asr, &ins),
+                ParsedInstructionKind::Core => self.process_core_instruction(asr, &ins),
                 _ => self.save_instruction(asr, &ins, buffer),
             }
             self.current.next();
@@ -128,12 +129,12 @@ impl SplitterBase {
             }
         }
     }
-    fn process_proof_chunk<R: Read>(&mut self, asr: &mut TextAsrParser<R>) -> Option<()> {
+    fn process_proof_chunk<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>) -> Option<()> {
         while let Some(ins) = asr.parse_instruction(false, true) {
             match ins.kind() {
-                PrepParsedInstructionKind::Rup => self.process_rup_instruction(asr, &ins),
-                PrepParsedInstructionKind::Del => self.process_del_instruction(asr, &ins),
-                PrepParsedInstructionKind::Wsr => self.process_wsr_instruction(asr, &ins),
+                ParsedInstructionKind::Rup => self.process_rup_instruction(asr, &ins),
+                ParsedInstructionKind::Del => self.process_del_instruction(asr, &ins),
+                ParsedInstructionKind::Wsr => self.process_wsr_instruction(asr, &ins),
                 _ => (),
             }
             self.next_counter();
@@ -147,12 +148,12 @@ impl SplitterBase {
         }
         None
     }
-    fn process_core_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
+    fn process_core_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let oid = *ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
         self.idmap.map(oid, clause_addr, ins.default_position()).unwrap();
     }
-    fn process_rup_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
+    fn process_rup_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let oid = *ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
         let pos = ins.default_position();
@@ -160,7 +161,7 @@ impl SplitterBase {
         let chain_addr = self.process_chain(asr.parse_chain());
         self.proof.insert_rup(nid, pos, chain_addr);
     }
-    fn process_wsr_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
+    fn process_wsr_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let oid = *ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
         let pos = ins.default_position();
@@ -174,12 +175,12 @@ impl SplitterBase {
         }
         self.dels.clear();
     }
-    fn process_del_instruction<R: Read>(&mut self, _: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
+    fn process_del_instruction<L: AsrLexer>(&mut self, _: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let oid = *ins.index();
         let (nid, addr, pos) = self.idmap.unmap(oid).unwrap();
         self.proof.insert_del(nid, pos, addr);
     }
-    fn process_clause<R: Read>(&mut self, mut ps: TextClauseParser<'_, R>) -> ClauseAddress {
+    fn process_clause<L: AsrLexer>(&mut self, mut ps: AsrClauseParser<'_, L>) -> ClauseAddress {
         while let Some(lit) = ps.next() {
             self.clause.push(lit);
         }
@@ -187,7 +188,7 @@ impl SplitterBase {
         self.clause.clear();
         addr
     }
-    fn process_chain<R: Read>(&mut self, mut ps: TextChainParser<'_, R>) -> ChainAddress {
+    fn process_chain<L: AsrLexer>(&mut self, mut ps: AsrChainParser<'_, L>) -> ChainAddress {
         while let Some(oid) = ps.next() {
             let nid = self.idmap.id(oid).unwrap();
             self.chain.push(nid);
@@ -196,7 +197,7 @@ impl SplitterBase {
         self.chain.clear();
         addr
     }
-    fn process_witness<R: Read>(&mut self, mut ps: TextWitnessParser<'_, R>) -> WitnessAddress {
+    fn process_witness<L: AsrLexer>(&mut self, mut ps: AsrWitnessParser<'_, L>) -> WitnessAddress {
         while let Some((var, lit)) = ps.next() {
             self.witness.push(var, lit);
         }
@@ -204,7 +205,7 @@ impl SplitterBase {
         self.witness.clear();
         addr
     }
-    fn process_multichain<R: Read>(&mut self, mut ps: TextMultichainParser<'_, R>, witness: WitnessAddress) -> MultichainAddress {
+    fn process_multichain<L: AsrLexer>(&mut self, mut ps: AsrMultichainParser<'_, L>, witness: WitnessAddress) -> MultichainAddress {
         self.mchain.set_witness(witness);
         while let Some((olat, spec)) = ps.next() {
             if let Some(chain_ps) = spec {
@@ -219,12 +220,12 @@ impl SplitterBase {
         self.mchain.clear();
         addr
     }
-    fn save_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction, buffer: &mut Vec<u8>) {
+    fn save_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction, buffer: &mut ProofBuffer) {
         let res = match ins.kind() {
-            PrepParsedInstructionKind::Core => asr.save_core_instruction(*ins.index(), ins.default_position(), buffer),
-            PrepParsedInstructionKind::Rup => asr.save_rup_instruction(*ins.index(), ins.default_position(), buffer),
-            PrepParsedInstructionKind::Del => asr.save_del_instruction(*ins.index(), ins.default_position(), buffer),
-            PrepParsedInstructionKind::Wsr => asr.save_wsr_instruction(*ins.index(), ins.default_position(), buffer),
+            ParsedInstructionKind::Core => buffer.core_instruction(*ins.index(), ins.default_position(), asr),
+            ParsedInstructionKind::Rup => buffer.rup_instruction(*ins.index(), ins.default_position(), asr),
+            ParsedInstructionKind::Del => buffer.del_instruction(*ins.index(), ins.default_position(), asr),
+            ParsedInstructionKind::Wsr => buffer.wsr_instruction(*ins.index(), ins.default_position(), asr),
         };
         if let Err(e) = res {
             panic!(format!("{}", e))
@@ -251,25 +252,24 @@ impl SplitterBase {
     }
 }
 
-pub struct Splitter<R: Read, S: Read> {
+pub struct Splitter<'a, L: AsrLexer> {
     base: SplitterBase,
-    asr: TextAsrParser<R>,
-    buffer: Option<TextAsrParser<S>>,
+    asr: AsrParser<L>,
+    buffer: Option<AsrParser<UnbufferedAsrBinaryLexer<&'a [u8]>>>,
 }
-impl<R: Read> Splitter<R, &[u8]> {
-    pub fn new(config: SplitterConfig, mut asr: TextAsrParser<R>, buffer: &mut Vec<u8>) -> Splitter<R, &[u8]> {
+impl<'a, L: AsrLexer> Splitter<'a, L> {
+    pub fn new(config: SplitterConfig, mut asr: AsrParser<L>, buffer: &'a mut ProofBuffer) -> Splitter<'a, L> {
         let mut base = SplitterBase::new(config);
         base.process_core(&mut asr, buffer);
         base.init_buffer();
-        let buffer_ps = TextAsrParser::new(InputReader::new(&buffer[..], &Path::new("(buffer)"), false));
+        let mut parser = AsrParser::new(UnbufferedAsrBinaryLexer::new(InputReader::new(buffer.reader(), Path::new("(buffer)"), false)));
+        parser.parse_proof_header();
         Splitter {
             base: base,
             asr: asr,
-            buffer: Some(buffer_ps),
+            buffer: Some(parser),
         }
     }
-}
-impl<R: Read, S: Read> Splitter<R, S> {
     pub fn next<'c>(&'c mut self) -> Option<SplitFragment<'c>> {
         if self.base.finished() {
             None
@@ -312,7 +312,7 @@ pub struct SplitFragment<'a> {
 }
 impl<'a> SplitFragment<'a> {
     pub fn dump<W: Write>(mut self, wt: &mut W) {
-        self.proof.write(&mut self.db, wt).unwrap_or_else(|e| panic!(format!("{}", e)));
+        self.proof.write_text(&mut self.db, wt).unwrap_or_else(|e| panic!(format!("{}", e)));
     }
 }
 impl<'a> Drop for SplitFragment<'a> {

@@ -7,171 +7,67 @@ use crate::{
 };
 
 #[repr(u8)]
+#[derive(Copy, Clone, Debug)]
 pub enum ModelValue {
-    Unassigned = 0b00u8,
-    True = 0b01u8,
-    False = 0b10u8,
+    Unassigned = 0b000u8,
+    True = 0b101u8,
+    False = 0b011u8,
 }
-
-#[derive(PartialEq, Eq, Debug)]
-#[repr(u8)]
-pub enum ModelMembership {
-    Unassigned = 0b00u8,
-    True = 0b01u8,
-    False = 0b10u8,
-    Tautology = 0b11u8,
-}
-impl ModelMembership {
-    pub fn is_true(&self) -> bool {
-        unsafe { mem::transmute::<&ModelMembership, &u8>(self) & 0b01u8 != 0u8 }
+impl ModelValue {
+    #[inline]
+    fn polarize(self, lit: Literal) -> ModelValue {
+        let val = unsafe { mem::transmute::<ModelValue, u8>(self) };
+        unsafe { mem::transmute::<u8, ModelValue>(val ^ ((lit.negative() as u8) * (val & 1u8) * 0b110 )) }
     }
-    pub fn is_false(&self) -> bool {
-        unsafe { mem::transmute::<&ModelMembership, &u8>(self) & 0b10u8 != 0u8 }
-    }
-    pub fn is_unassigned(&self) -> bool {
-        match self {
-            ModelMembership::Unassigned => true,
-            _ => false,
-        }
-    }
-    pub fn is_tautology(&self) -> bool {
-        match self {
-            ModelMembership::Tautology => true,
-            _ => false,
-        }
+    #[inline]
+    fn assign(&mut self, mv: ModelValue) {
+        let this = unsafe { mem::transmute::<&mut ModelValue, &mut u8>(self) };
+        let that = unsafe { mem::transmute::<ModelValue, u8>(mv) };
+        *this |= ((*this ^ that) & 1u8) * that;
     }
 }
-impl From<ModelValue> for ModelMembership {
-    fn from(mv: ModelValue) -> ModelMembership {
-        unsafe { mem::transmute::<ModelValue, ModelMembership>(mv) }
-    }
-}
-
-// pub struct Model {
-//     vec: Vec<u8>
-// }
-// impl Model {
-//     pub fn new() -> Model {
-//         Model { vec: Vec::new() }
-//     }
-//     pub unsafe fn value(&self, lit: Literal) -> ModelValue {
-//         let index = lit.index();
-//         let val = self.vec.get(index >> 1).unwrap_or(0u8);
-//         mem::transmute::<u8, ModelValue>(val ^ (0b11u8 * ((index as u8) & 1u8)))
-//     }
-//     pub fn member(&self, lit: Literal) -> ModelMembership {
-//         let index = lit.index();
-//         let val = self.vec.get(index >> 1).unwrap_or(0u8);
-//         mem::transmute::<u8, ModelValue>(val ^ (0b11u8 * ((index as u8) & 1u8)))
-//         let index = lit.index();
-//         match self.vec.get(index >> 3) {
-//             Some(chunk) => {
-//                 let val = Model::get_value(chunk, index);
-//                 unsafe { mem::transmute::<u8, ModelMembership>(val) }
-//             },
-//             None => ModelMembership::Unassigned,
-//         }
-//     }
-// }
 
 pub struct Model {
-    vec: Vec<u8>,
+    vec: Vec<ModelValue>
 }
 impl Model {
     pub fn new() -> Model {
-        Model { vec: Vec::new() }
+        let mut vec = Vec::with_capacity(1usize << 16);
+        vec.resize((1usize << 16) - 1usize, ModelValue::Unassigned);
+        Model { vec: vec }
     }
-    pub unsafe fn value(&self, lit: Literal) -> ModelValue {
-        let index = lit.index();
-        match self.vec.get(index >> 3) {
-            Some(chunk) => {
-                let val = Model::get_value(chunk, index);
-                mem::transmute::<u8, ModelValue>(val)
-            },
-            None => ModelValue::Unassigned,
-        }
-    }
-    pub fn member(&self, lit: Literal) -> ModelMembership {
-        let index = lit.index();
-        match self.vec.get(index >> 3) {
-            Some(chunk) => {
-                let val = Model::get_value(chunk, index);
-                unsafe { mem::transmute::<u8, ModelMembership>(val) }
-            },
-            None => ModelMembership::Unassigned,
+    pub fn value(&self, lit: Literal) -> ModelValue {
+        let index = lit.index() >> 1;
+        if let Some(val) = self.vec.get(index) {
+            val.polarize(lit)
+        } else {
+            ModelValue::Unassigned
         }
     }
     pub fn set(&mut self, lit: Literal) {
-        let index = lit.index();
-        let chunk_index = index >> 3;
-        if chunk_index >= self.vec.len() {
-            self.vec.resize((chunk_index << 1) + 1usize, 0u8);
+        let index = lit.index() >> 1;
+        if index >= self.vec.len() {
+            self.vec.resize((index << 1) + 1usize, ModelValue::Unassigned);
         }
-        let chunk = unsafe { self.vec.get_unchecked_mut(chunk_index) };
-        let shift = index & 0b111usize;
-        if *chunk & (0b1u8 << (shift ^ 1usize)) == 0u8 {
-            *chunk |= 0b1u8 << shift;
-        }
+        let rf = unsafe { self.vec.get_unchecked_mut(index) };
+        let new = ModelValue::True.polarize(lit);
+        rf.assign(new);
     }
     pub fn check_set(&mut self, lit: Literal) -> ModelValue {
-        let index = lit.index();
-        let chunk_index = index >> 3;
-        if chunk_index >= self.vec.len() {
-            self.vec.resize((chunk_index << 1) + 1usize, 0u8);
+        let index = lit.index() >> 1;
+        if index >= self.vec.len() {
+            self.vec.resize((index << 1) + 1usize, ModelValue::Unassigned);
         }
-        let chunk = unsafe { self.vec.get_unchecked_mut(chunk_index) };
-        let val = Model::get_value(chunk, index);
-        if val == 0u8 {
-            *chunk |= 0b1u8 << (index & 0b111usize);
-        }
-        unsafe { mem::transmute::<u8, ModelValue>(val) }
-    }
-    pub fn force(&mut self, lit: Literal) {
-        let index = lit.index();
-        let chunk_index = index >> 3;
-        if chunk_index >= self.vec.len() {
-            self.vec.resize((chunk_index << 1) + 1usize, 0u8);
-        }
-        let chunk = unsafe { self.vec.get_unchecked_mut(chunk_index) };
-        *chunk |= 0b1u8 << (index & 0b111usize);
-    }
-    pub fn check_force(&mut self, lit: Literal) -> ModelMembership {
-        let index = lit.index();
-        let chunk_index = index >> 3;
-        if chunk_index >= self.vec.len() {
-            self.vec.resize((chunk_index << 1) + 1usize, 0u8);
-        }
-        let chunk = unsafe { self.vec.get_unchecked_mut(chunk_index) };
-        let val = Model::get_value(chunk, index);
-        *chunk |= 0b1u8 << (index & 0b111usize);
-        unsafe { mem::transmute::<u8, ModelMembership>(val) }
+        let rf = unsafe { self.vec.get_unchecked_mut(index) };
+        let old = *rf;
+        let new = ModelValue::True.polarize(lit);
+        rf.assign(new);
+        old.polarize(lit)
     }
     pub fn clear(&mut self, lit: Literal) {
-        let index = lit.index();
-        if let Some(chunk) = self.vec.get_mut(index >> 3) {
-            let shift = index & 0b110usize;
-            *chunk &= !(0b11u8 << shift);
-        }
-    }
-    pub fn check_clear(&mut self, lit: Literal) -> ModelMembership {
-        let index = lit.index();
-        match self.vec.get_mut(index >> 3) {
-            Some(chunk) => {
-                let val = Model::get_value(chunk, index);
-                let shift = index & 0b110usize;
-                *chunk &= !(0b11u8 << shift);
-                unsafe { mem::transmute::<u8, ModelMembership>(val) }
-            },
-            None => ModelMembership::Unassigned,
-        }
-    }
-    fn get_value(chunk: &u8, index: usize) -> u8 {
-        let shift: usize = index & 0b110usize;
-        let val: u8 = *chunk >> shift;
-        if index & 0b1usize == 0usize {
-            val & 0b11u8
-        } else {
-            ((val & 0b01u8) << 1) | ((val & 0b10u8) >> 1)
+        let index = lit.index() >> 1;
+        if let Some(val) = self.vec.get_mut(index) {
+            *val = ModelValue::Unassigned;
         }
     }
 }
@@ -185,81 +81,80 @@ pub mod test {
     use rand::{self, Rng};
 	use crate::{
         basic::{Literal, test::{generate_literal,}},
-        model::{Model, ModelMembership},
+        model::{Model, ModelValue},
     };
 
     #[test]
     fn test_model() {
         let mut rng = rand::thread_rng();
-        let mut model = Model::new();
         let mut vec = Vec::new();
+        let mut model = Model::new();
         for _ in 0 .. 50 {
             for _ in 0 .. 1000 {
                 let lit = generate_literal(&mut rng, Some(3000u32));
-                vec.push(lit);
-            }
-            for (n, &lit) in vec.iter().enumerate() {
                 let comp = lit.complement();
-                let pos = vec[0 .. n].iter().any(|&x| x == lit);
-                let neg = vec[0 .. n].iter().any(|&x| x == comp);
-                let member = model.member(lit);
-                assert!(pos == member.is_true());
-                assert!(neg == member.is_false());
-                assert!((pos && neg) == member.is_tautology());
-                assert!((!pos && !neg) == member.is_unassigned());
-                if !pos || !neg {
-                    assert!(ModelMembership::from(unsafe { model.value(lit) }) == member);
+                let pos = vec.iter().any(|&x| x == lit);
+                let neg = vec.iter().any(|&x| x == comp);
+                match model.value(lit) {
+                    ModelValue::Unassigned => assert!(!pos && !neg),
+                    ModelValue::True => assert!(pos && !neg),
+                    ModelValue::False => assert!(!pos && neg),
                 }
-                model.set(lit);
-                if !neg {
-                    assert!(model.member(lit).is_true());
+                match model.value(comp) {
+                    ModelValue::Unassigned => assert!(!pos && !neg),
+                    ModelValue::True => assert!(neg && !pos),
+                    ModelValue::False => assert!(!neg && pos),
+                }
+                match model.check_set(lit) {
+                    ModelValue::Unassigned => assert!(!pos && !neg),
+                    ModelValue::True => assert!(pos && !neg),
+                    ModelValue::False => assert!(!pos && neg),
+                }
+                if !pos && !neg {
+                    if let ModelValue::True = model.value(lit) { } else {
+                        assert!(false);
+                    }
+                    if let ModelValue::False = model.value(comp) { } else {
+                        assert!(false);
+                    }
                 } else {
-                    assert!(model.member(lit) == member);
+                    match model.value(lit) {
+                        ModelValue::Unassigned => assert!(!pos && !neg),
+                        ModelValue::True => assert!(pos && !neg),
+                        ModelValue::False => assert!(!pos && neg),
+                    }
                 }
-                model.force(lit);
-                assert!(model.member(lit).is_true());
-                assert!(model.member(lit).is_tautology() == neg);
                 model.clear(lit);
-                assert!(model.member(lit).is_unassigned());
-                assert!(model.member(comp).is_unassigned());
-                if pos {
-                    model.force(lit);
+                if let ModelValue::Unassigned = model.value(lit) { } else {
+                    assert!(false);
+                }
+                if let ModelValue::Unassigned = model.value(comp) { } else {
+                    assert!(false);
                 }
                 if neg {
-                    model.force(comp);
-                }
-                assert!(model.member(lit) == member);
-                let check_set = model.check_set(lit);
-                let check_clear = model.check_clear(lit);
-                let check_force = model.check_force(lit);
-                let check_force_comp = if neg {
-                    model.check_force(comp)
+                    model.set(comp);
                 } else {
-                    model.member(comp)
-                };
-                assert!(ModelMembership::from(check_set) == member);
-                if !neg {
-                    assert!(check_clear.is_true());
-                } else {
-                    assert!(check_clear == member);
+                    model.set(lit);
                 }
-                assert!(check_force.is_unassigned());
-                assert!(check_force_comp.is_false() && !check_force_comp.is_true());
-                assert!(model.member(lit).is_true() && (model.member(lit).is_false() == neg));
-                assert!(model.member(comp).is_false() && (model.member(comp).is_true() == neg));
-            }
-            for n in 0u32 .. 3000u32 {
-                let lit = unsafe { mem::transmute::<u32, Literal>(n) };
-                assert!(model.member(lit).is_true() == vec.iter().any(|&x| x == lit));
+                match model.value(lit) {
+                    ModelValue::Unassigned => assert!(false),
+                    ModelValue::True => assert!(!neg),
+                    ModelValue::False => assert!(neg),
+                }
+                match model.value(comp) {
+                    ModelValue::Unassigned => assert!(false),
+                    ModelValue::True => assert!(neg),
+                    ModelValue::False => assert!(!neg),
+                }
+                if !neg && !pos {
+                    vec.push(lit);
+                }
             }
             for &lit in &vec {
                 model.clear(lit);
             }
-            for n in 0u32 .. 3000u32 {
-                let lit = unsafe { mem::transmute::<u32, Literal>(n) };
-                assert!(model.member(lit).is_unassigned());
-            }
             vec.clear();
         }
+        
     }
 }

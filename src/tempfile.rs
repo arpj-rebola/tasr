@@ -37,7 +37,7 @@ impl TempFiles {
             index: index,
         }
     }
-    pub fn conflate<W: Write>(self, source: &Path, count: u64, wt: &mut W) {
+    pub fn conflate_text<W: Write>(self, source: &Path, count: u64, wt: &mut W) {
         let mut core: bool = true;
         for path in self.core.iter().chain(self.trimmed.iter()) {
             let mut file = match OpenOptions::new().read(true).open(&path) {
@@ -56,6 +56,39 @@ impl TempFiles {
             if core {
                 write!(wt, "p proof\n")
                     .unwrap_or_else(|err| panic!(format!("{}", err)));
+            }
+            core = false;
+            if path.exists() {
+                fs::remove_file(path).unwrap_or_else(|err| TempFiles::deletion_error(path.as_path(), err))
+            }
+        }
+    }
+    pub fn conflate_binary<W: Write>(self, source: &Path, count: u64, wt: &mut W) {
+        let mut core: bool = true;
+        for path in self.core.iter().chain(self.trimmed.iter()) {
+            let mut file = match OpenOptions::new().read(true).open(&path) {
+                Ok(file) => BufReader::new(file),
+                Err(err) => TempFiles::opening_error(&path, err),
+            };
+            if core {
+                wt.write_all(&[0x00, 0x01, b'p', b's', b'o', b'u', b'r', b'c', b'e', 0x00, b'"']).unwrap_or_else(|err| panic!(format!("{}", err)));
+                write!(wt, "{}\"", source.to_string_lossy().escape_default()).unwrap_or_else(|err| panic!(format!("{}", err)));
+                wt.write_all(&[0x01, b'p', b'c', b'o', b'u', b'n', b't', 0x00]).unwrap_or_else(|err| panic!(format!("{}", err)));
+                let mut num: u64 = count << 1;
+                loop {
+                    let c = (num & 0b0111_1111u64) as u8;
+                    num >>= 7;
+                    let cont = num != 0u64;
+                    wt.write_all(&[c | ((cont as u8) * 0b1000_0000u8)]).unwrap_or_else(|err| panic!(format!("{}", err)));
+                    if !cont {
+                        break;
+                    }
+                }
+                wt.write_all(&[0x01, b'p', b'c', b'o', b'r', b'e', 0x00]).unwrap_or_else(|err| panic!(format!("{}", err)));
+            }
+            io::copy(&mut file, wt).unwrap_or_else(|err| panic!(format!("{}", err)));
+            if core {
+                wt.write_all(&[0x01, b'p', b'p', b'r', b'o', b'o', b'f']).unwrap_or_else(|err| panic!(format!("{}", err)));
             }
             core = false;
             if path.exists() {

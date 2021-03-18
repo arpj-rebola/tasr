@@ -2,7 +2,6 @@ use std::{
     mem::{self},
     time::{Instant, Duration},
     path::{PathBuf},
-    io::{Write, Read},
 };
 
 use either::{
@@ -16,8 +15,10 @@ use crate::{
     substitution::{Substitution},
     idflags::{ClauseIndexFlags},
     display::{DisplayClause, DisplayLiteralCsv, DisplayLiteralPairCsv, DisplaySubstitution, DisplaySubstitutionMappingCsv, DisplaySubstitutionMultimappingCsv, DisplayChain, DisplayClauseIndexCsv},
-    textparser::{PrepParsedInstruction, PrepParsedInstructionKind, TextAsrParser, TextClauseParser, TextChainParser, TextWitnessParser, TextMultichainParser},
+    lexer::{AsrLexer, UnbufferedAsrBinaryLexer},
+    parser::{ParsedInstruction, ParsedInstructionKind, AsrParser, AsrClauseParser, AsrChainParser, AsrWitnessParser, AsrMultichainParser},
     buffer::{ClauseBuffer, WitnessBuffer, ChainBuffer, MultichainBuffer},
+    proof::{ProofBuffer},
 };
 
 pub struct VariableCounter {
@@ -237,44 +238,57 @@ impl IntegrityStats {
             asr_time: None,
         }
     }
+    #[inline]
     fn record_cnf_time(&mut self) {
         self.cnf_time = Some(Instant::now().duration_since(self.start_time));
         self.start_time = Instant::now();
     }
+    #[inline]
     fn record_asr_time(&mut self) {
         self.asr_time = Some(Instant::now().duration_since(self.start_time));
         self.start_time = Instant::now();
     }
+    #[inline]
     fn new_premise(&mut self) {
         self.num_premises += 1u64;
     }
+    #[inline]
     fn new_core(&mut self) {
         self.num_cores += 1u64;
     }
+    #[inline]
     fn new_instruction(&mut self) {
         self.num_instructions += 1u64;
     }
+    #[inline]
     fn new_rup(&mut self) {
         self.num_rup += 1u64;
     }
+    #[inline]
     fn new_wsr(&mut self) {
         self.num_wsr += 1u64;
     }
+    #[inline]
     fn new_del(&mut self) {
         self.num_del += 1u64;
     }
+    #[inline]
     fn update_literal(&mut self, lit: Literal) {
         self.max_var.update_literal(lit)
     }
+    #[inline]
     fn update_variable(&mut self, var: Variable) {
         self.max_var.update_variable(var)
     }
+    #[inline]
     fn update_index(&mut self, id: ClauseIndex) {
         self.max_id.update(id)
     }
+    #[inline]
     fn check_variables(&self, vars: u32) -> bool {
         self.max_var.get() <= vars
     }
+    #[inline]
     fn check_clauses(&self, cls: u64) -> bool {
         self.num_premises == cls
     }
@@ -339,22 +353,18 @@ impl IntegrityVerifier {
             deferred: PathBuf::from("(unknown)"),
         }
     }
-    pub fn check<R, S>(&mut self, mut cnf: TextAsrParser<R>, mut asr: TextAsrParser<S>) where
-        R: Read,
-        S: Read,
-    {
+    pub fn check<L: AsrLexer, M: AsrLexer>(&mut self, mut cnf: AsrParser<L>, mut asr: AsrParser<M>) {
         // Set the path to the CNF formula as the reference for error-reporting.
         self.original = cnf.path().to_path_buf();
         // Check the CNF formula.
         self.check_cnf(&mut cnf);
         // Make a new buffer.
-        let mut buffer = Vec::<u8>::new();
-        write!(&mut buffer, "p proof\n").unwrap_or_else(|e| panic!(format!("{}", e)));
+        let mut buffer = ProofBuffer::new();
         // Set the path to the ASR proof as the reference for error-reporting...
         self.original = asr.path().to_path_buf();
         // ... and possibly use the 'p source' header as a deferred reference.
         self.deferred = if let Some((_, src)) = asr.parse_source_header() {
-            src
+            PathBuf::from(src)
         } else {
             PathBuf::from("(unknown)")
         };
@@ -368,16 +378,16 @@ impl IntegrityVerifier {
         let mut temp_path = PathBuf::from("(buffer)");
         mem::swap(&mut self.original, &mut temp_path);
         mem::swap(&mut self.deferred, &mut temp_path);
+        buffer.print();
         // Check the ASR proof fragment corresponding to the buffer.
-        let buffer_input = InputReader::new(&buffer[..], &self.original, false);
-        let mut buffer_ps = TextAsrParser::new(buffer_input);
+        let buffer_input = InputReader::new(buffer.reader(), &self.original, false);
+        let mut buffer_ps = AsrParser::new(UnbufferedAsrBinaryLexer::new(buffer_input));
         self.check_asr_proof(&mut buffer_ps, true);
         // Restore the alternative paths for error-reporting, and drop all structures related to buffering.
         mem::swap(&mut self.deferred, &mut temp_path);
         mem::swap(&mut self.original, &mut temp_path);
         mem::drop(temp_path);
         mem::drop(buffer_ps);
-        mem::drop(buffer);
         // Check the rest of the ASR proof.
         self.check_asr_proof(&mut asr, false);
         if let None = self.stats.first_qed {
@@ -402,9 +412,7 @@ impl IntegrityVerifier {
         };
         (self.stats, data)
     }
-    fn check_cnf<R>(&mut self, cnf: &mut TextAsrParser<R>) where
-        R: Read
-    {
+    fn check_cnf<L: AsrLexer>(&mut self, cnf: &mut AsrParser<L>) {
         self.current = InstructionNumber::new_premise();
         let (cnfpos, cnfvar, cnfcls) = cnf.parse_cnf_header();
         while let Some(pos) = cnf.parse_premise() {
@@ -420,35 +428,29 @@ impl IntegrityVerifier {
         }
         self.stats.record_cnf_time();
     }
-    fn check_asr_core<R>(&mut self, asr: &mut TextAsrParser<R>, buffer: &mut Vec<u8>) where
-        R: Read
-    {
+    fn check_asr_core<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, buffer: &mut ProofBuffer) {
         self.current = InstructionNumber::new_core();
         asr.parse_core_header();
         while let Some(ins) = asr.parse_instruction(true, self.config.preprocessing) {
             match ins.kind() {
-                PrepParsedInstructionKind::Core => self.check_asr_core_instruction(asr, &ins),
+                ParsedInstructionKind::Core => self.check_asr_core_instruction(asr, &ins),
                 _ => self.save_instruction(asr, &ins, buffer),
             }
         }
     }
-    fn check_asr_proof<R>(&mut self, asr: &mut TextAsrParser<R>, buffered: bool) where
-        R: Read
-    {
+    fn check_asr_proof<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, buffered: bool) {
         self.current = if buffered { InstructionNumber::new_buffer() } else { InstructionNumber::new_proof() };
         asr.parse_proof_header();
         while let Some(ins) = asr.parse_instruction(false, true) {
             match ins.kind() {
-                PrepParsedInstructionKind::Rup => self.check_asr_rup_instruction(asr, &ins),
-                PrepParsedInstructionKind::Del => self.check_asr_del_instruction(asr, &ins),
-                PrepParsedInstructionKind::Wsr => self.check_asr_wsr_instruction(asr, &ins),
+                ParsedInstructionKind::Rup => self.check_asr_rup_instruction(asr, &ins),
+                ParsedInstructionKind::Del => self.check_asr_del_instruction(asr, &ins),
+                ParsedInstructionKind::Wsr => self.check_asr_wsr_instruction(asr, &ins),
                 _ => (),
             }
         }
     }
-    fn check_asr_core_instruction<R>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) where
-        R: Read
-    {
+    fn check_asr_core_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         self.next_instruction();
         let id = *ins.index();
         self.stats.update_index(id);
@@ -458,9 +460,7 @@ impl IntegrityVerifier {
         self.check_clause(asr.parse_clause(), Right(ins));
         self.stats.new_core();
     }
-    fn check_asr_rup_instruction<R>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) where
-        R: Read
-    {
+    fn check_asr_rup_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         self.next_instruction();
         let id = *ins.index();
         self.stats.update_index(id);
@@ -472,9 +472,7 @@ impl IntegrityVerifier {
         self.stats.new_instruction();
         self.stats.new_rup();
     }
-    fn check_asr_wsr_instruction<R>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) where
-        R: Read
-    {
+    fn check_asr_wsr_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         self.next_instruction();
         let id = *ins.index();
         self.stats.update_index(id);
@@ -487,9 +485,7 @@ impl IntegrityVerifier {
         self.stats.new_instruction();
         self.stats.new_wsr();
     }
-    fn check_asr_del_instruction<R>(&mut self, _: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) where
-        R: Read
-    {
+    fn check_asr_del_instruction<L: AsrLexer>(&mut self, _: &mut AsrParser<L>, ins: &ParsedInstruction) {
         self.next_instruction();
         let id = *ins.index();
         self.stats.update_index(id);
@@ -499,9 +495,7 @@ impl IntegrityVerifier {
         self.stats.new_instruction();
         self.stats.new_del();
     }
-    fn check_clause<R>(&mut self, mut ps: TextClauseParser<'_, R>, data: Either<&FilePosition, &PrepParsedInstruction>) where
-        R: Read
-    {
+    fn check_clause<L: AsrLexer>(&mut self, mut ps: AsrClauseParser<'_, L>, data: Either<&FilePosition, &ParsedInstruction>) {
         while let Some(lit) = ps.next() {
             self.stats.update_literal(lit);
             self.clause.push(&mut self.model, lit);
@@ -516,9 +510,7 @@ impl IntegrityVerifier {
         }
         self.clause.clear(&mut self.model);
     }
-    fn check_witness<R>(&mut self, mut ps: TextWitnessParser<'_, R>, ins: &PrepParsedInstruction) where
-        R: Read
-    {
+    fn check_witness<L: AsrLexer>(&mut self, mut ps: AsrWitnessParser<'_, L>, ins: &ParsedInstruction) {
         while let Some((var, lit)) = ps.next() {
             self.stats.update_variable(var);
             self.stats.update_literal(lit);
@@ -529,9 +521,7 @@ impl IntegrityVerifier {
         }
         self.witness.clear(&mut self.subst);
     }
-    fn check_chain<R>(&mut self, mut ps: TextChainParser<'_, R>, ins: &PrepParsedInstruction, lat: Option<ClauseIndex>) where
-        R: Read
-    {
+    fn check_chain<L: AsrLexer>(&mut self, mut ps: AsrChainParser<'_, L>, ins: &ParsedInstruction, lat: Option<ClauseIndex>) {
         self.chain.exclude(*ins.index());
         while let Some(id) = ps.next() {
             self.stats.update_index(id);
@@ -542,9 +532,7 @@ impl IntegrityVerifier {
         }
         self.chain.clear();
     }
-    fn check_multichain<R>(&mut self, mut ps: TextMultichainParser<'_, R>, ins: &PrepParsedInstruction) where
-        R: Read
-    {
+    fn check_multichain<L: AsrLexer>(&mut self, mut ps: AsrMultichainParser<'_, L>, ins: &ParsedInstruction) {
         while let Some((lat, sub)) = ps.next() {
             self.stats.update_index(lat);
             if let Some(chain_ps) = sub {
@@ -577,14 +565,12 @@ impl IntegrityVerifier {
         vec.reverse();
         self.insertions = Some(vec)
     }
-    fn save_instruction<R>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction, buffer: &mut Vec<u8>) where
-        R: Read
-    {
+    fn save_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction, buffer: &mut ProofBuffer) {
         let res = match ins.kind() {
-            PrepParsedInstructionKind::Core => asr.save_core_instruction(*ins.index(), ins.default_position(), buffer),
-            PrepParsedInstructionKind::Rup => asr.save_rup_instruction(*ins.index(), ins.default_position(), buffer),
-            PrepParsedInstructionKind::Del => asr.save_del_instruction(*ins.index(), ins.default_position(), buffer),
-            PrepParsedInstructionKind::Wsr => asr.save_wsr_instruction(*ins.index(), ins.default_position(), buffer),
+            ParsedInstructionKind::Core => buffer.core_instruction(*ins.index(), ins.default_position(), asr),
+            ParsedInstructionKind::Rup => buffer.rup_instruction(*ins.index(), ins.default_position(), asr),
+            ParsedInstructionKind::Del => buffer.del_instruction(*ins.index(), ins.default_position(), asr),
+            ParsedInstructionKind::Wsr => buffer.wsr_instruction(*ins.index(), ins.default_position(), asr),
         };
         if let Err(e) = res {
             panic!(format!("{}", e))
@@ -599,32 +585,32 @@ impl IntegrityVerifier {
     fn invalid_num_instructions(&mut self, pos: FilePosition, num: u64) {
         self.stats.log_error(IntegrityError::InvalidNumberOfInstructions(pos.with_path(&self.original), num, self.stats.num_cores + self.stats.num_instructions));
     }
-    fn invalid_clause(&mut self, data: Either<&FilePosition, &PrepParsedInstruction>) {
+    fn invalid_clause(&mut self, data: Either<&FilePosition, &ParsedInstruction>) {
         let (clause, reps, confs) = self.clause.extract();
         let pos = data.either(|pos| pos.with_path(&self.original).deferred(), |ins| ins.position(&self.original, &self.deferred));
         let id = data.either(|_| None, |ins| Some(*ins.index()));
         self.stats.log_error(IntegrityError::InvalidClause(pos, id, self.current, clause, reps, confs));
     }
-    fn invalid_witness(&mut self, ins: &PrepParsedInstruction) {
+    fn invalid_witness(&mut self, ins: &ParsedInstruction) {
         let (witness, reps, confs) = self.witness.extract();
         let pos = ins.position(&self.original, &self.deferred);
         self.stats.log_error(IntegrityError::InvalidWitness(pos, *ins.index(), self.current, witness, reps, confs));
     }
-    fn conflicting_id(&mut self, ins: &PrepParsedInstruction) {
+    fn conflicting_id(&mut self, ins: &ParsedInstruction) {
         let pos = ins.position(&self.original, &self.deferred);
         self.stats.log_error(IntegrityError::ConflictingId(pos, *ins.index(), self.current));
     }
-    fn missing_chain_id(&mut self, lat_id: Option<ClauseIndex>, ins: &PrepParsedInstruction) {
+    fn missing_chain_id(&mut self, lat_id: Option<ClauseIndex>, ins: &ParsedInstruction) {
         let (chain, missing) = self.chain.extract();
         let pos = ins.position(&self.original, &self.deferred);
         self.stats.log_error(IntegrityError::ChainMissingId(pos, *ins.index(), self.current, lat_id, chain, missing));
     }
-    fn invalid_lateral_id(&mut self, ins: &PrepParsedInstruction) {
+    fn invalid_lateral_id(&mut self, ins: &ParsedInstruction) {
         let (laterals, miss_chain, miss_del, reps) = self.mchain.extract();
         let pos = ins.position(&self.original, &self.deferred);
         self.stats.log_error(IntegrityError::InvalidLateralId(pos, *ins.index(), self.current, laterals, miss_chain, miss_del, reps));
     }
-    fn missing_deletion_id(&mut self, ins: &PrepParsedInstruction) {
+    fn missing_deletion_id(&mut self, ins: &ParsedInstruction) {
         let pos = ins.position(&self.original, &self.deferred);
         self.stats.log_error(IntegrityError::MissingDeletionId(pos, *ins.index(), self.current));
     }
@@ -638,10 +624,10 @@ impl IntegrityVerifier {
 //     fn check_instance(cnf: &Path, asr: &Path) {
 //         let cnf_file = File::open(cnf);
 //         let cnf_input = InputReader::new(cnf_file, cnf, false);
-//         let cnf_parser = TextAsrParser::new(cnf_input);
+//         let cnf_parser = AsrParser::new(cnf_input);
 //         let asr_file = File::open(asr);
 //         let asr_input = InputReader::new(asr_file, asr, false);
-//         let asr_parser = TextAsrParser::new(asr_input);
+//         let asr_parser = AsrParser::new(asr_input);
 //         let config = IntegrityConfig {
 //             preprocessing: false,
 //             select: 1u64,

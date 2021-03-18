@@ -93,7 +93,7 @@ impl Substitution {
         }
     }
     pub fn map(&self, lit: Literal) -> Literal {
-        match lit.variable().get() {
+        match lit.variable() {
             Some(var) => match self.get(var) {
                 Some(l) => if lit.positive() {
                     l

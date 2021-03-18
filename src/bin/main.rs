@@ -1,302 +1,295 @@
-fn main () {
 
+#![allow(non_upper_case_globals)]
+
+#[macro_use]
+extern crate lazy_static;
+
+use std::{
+    process::{self},
+    sync::{Mutex},
+    panic::{self},
+    path::{PathBuf},
+};
+
+use clap::{
+    Arg, App, AppSettings, Error as ClapError, ErrorKind as ClapErrorKind, Result as ClapResult, SubCommand,
+};
+
+use tasr::{
+    progress, fatal, panick, create_message, headed_message, append, breakline,
+    io::{PrintedPanic},
+    app::{PreprocessingConfig, CheckingConfig},
+};
+
+lazy_static! {
+    static ref PanicMessage: Mutex<String> = {
+        Mutex::new(String::new())
+    };
 }
 
-// #![feature(generic_associated_types)]
-// #![feature(map_first_last)]
-// #![feature(maybe_uninit_ref)]
-// #![feature(ptr_offset_from)]
-// #![feature(test)]
-// #![allow(non_upper_case_globals)]
-// #![allow(incomplete_features)]
-// #![allow(dead_code)]
-// #![allow(unused_macros)]
+pub enum AppConfig {
+    Preprocess(PreprocessingConfig),
+    Check(CheckingConfig),
+}
+impl AppConfig {
+    pub fn run(self) -> bool {
+        match self {
+            AppConfig::Preprocess(mut config) => {
+                progress!("checking file integrity...", lock, {
+                    append!(lock, "Checking the CNF file {} and raw ASR file {} for format errors and undefined references.", config.cnf.display(), config.asr.display());
+                });
+                config.integrity();
+                progress!("preprocessing ASR proof...", lock, {
+                    append!(lock, "Preprocessing the raw ASR file {} into the preprocessed ASR file {} to reuse indices, trim unnecessary inferences, and reduce complex proof steps.",
+                        config.asr.display(), config.output.as_ref().map(|x| x.display()).unwrap_or_else(|| config.asr.display()));
+                });
+                config.preprocess();
+                config.print_integrity_stats();
+                config.print_preprocessing_stats();
+                config.print_final_result();
+                config.total_errors() == 0usize
+            },
+            AppConfig::Check(mut config) => {
+                progress!("checking file integrity...", lock, {
+                    append!(lock, "Checking the CNF file {} and preprocessed ASR file {} for format errors and undefined references.", config.cnf.display(), config.asr.display());
+                });
+                config.integrity();
+                progress!("checking ASR proof correctness...", lock, {
+                    append!(lock, "Checking the CNF file {} and preprocessed ASR file {} for incorrect inferences.",
+                        config.cnf.display(), config.asr.display());
+                });
+                config.integrity();
+                config.correctness();
+                config.print_integrity_stats();
+                config.print_correctness_stats();
+                config.print_final_result();
+                config.total_errors() == 0usize
+            },
+        }
+    }
+}
 
-// #[macro_use]
-// extern crate lazy_static;
+struct Tasr {
+    config: AppConfig,
+}
+impl Tasr {
+    pub fn parse_cli() -> ClapResult<Tasr> {
+        let app = Tasr::build_cli_parser();
+        let config = Tasr::parse_cli_options(app)?;
+        Ok(Tasr {
+            config: config,
+        })
+    }
+    pub fn run(self) -> bool {
+        self.config.run()
+    }
+    fn build_cli_parser<'a, 'b>() -> App<'a, 'b> {
+        App::new(env!("CARGO_PKG_NAME"))
+        .setting(AppSettings::ColoredHelp)
+        .setting(AppSettings::SubcommandRequired)
+        .set_term_width(80usize)
+        .version(env!("CARGO_PKG_VERSION"))
+        .author(env!("CARGO_PKG_AUTHORS"))
+        .about(env!("CARGO_PKG_DESCRIPTION"))
+        .subcommand(SubCommand::with_name("preprocess")
+            .setting(AppSettings::ColoredHelp)
+            .about("preprocesses an ASR proof for more efficient checking")
+            .arg(Arg::with_name("BATCHSIZE")
+                .long("batchsize")
+                .takes_value(true)
+                .value_name("N")
+                .number_of_values(1u64)
+                .help("number of instructions per preprocessing batch (recommended for large proofs)"))
+            .arg(Arg::with_name("TEMPDIR")
+                .long("temp")
+                .takes_value(true)
+                .value_name("TEMP")
+                .number_of_values(1u64)
+                .help("path for temporary files (proof directory is used if missing)"))
+            .arg(Arg::with_name("OUTPUT")
+                .long("out")
+                .takes_value(true)
+                .value_name("OUTPUT")
+                .number_of_values(1u64)
+                .help("path for output preprocessed file (proof file is overwriten if missing)"))
+            .arg(Arg::with_name("STATS")
+                .long("stats")
+                .help("prints statistics"))
+            .arg(Arg::with_name("FORMULA")
+                .index(1u64)
+                .required(true)
+                .help("path to the input CNF formula file"))
+            .arg(Arg::with_name("PROOF")
+                .index(2u64)
+                .required(true)
+                .help("path to the input ASR proof file")))
+        .subcommand(SubCommand::with_name("check")
+            .setting(AppSettings::ColoredHelp)
+            .about("checks an ASR proof (or a fragment thereof)")
+            .arg(Arg::with_name("PART")
+                .long("--part")
+                .takes_value(true)
+                .value_names(&["N", "TOTAL"])
+                .number_of_values(2u64)
+                .help("checks only part N of TOTAL parts"))
+            .arg(Arg::with_name("STATS")
+                .long("stats")
+                .help("prints statistics"))
+            .arg(Arg::with_name("PERMISSIVE")
+                .long("--permissive")
+                .help("disables warnings for correct but redundant RUP chains"))
+            .arg(Arg::with_name("FORMULA")
+                .index(1u64)
+                .required(true)
+                .help("path to the input CNF formula file"))
+            .arg(Arg::with_name("PROOF")
+                .index(2u64)
+                .required(true)
+                .help("path to the input ASR proof file")))
+    }
+    fn parse_cli_options(app: App<'_, '_>) -> ClapResult<AppConfig> {
+        let matches = app.get_matches_safe()?;
+        if let Some(matches) = matches.subcommand_matches("preprocess") {
+            let batchsize = if matches.is_present("BATCHSIZE") {
+                match matches.value_of("BATCHSIZE").unwrap().parse::<u64>() {
+                    Ok(num) if num > 0u64 => num,
+                    _ => Err(ClapError::with_description(&format!(
+                        "The value for the argument '--batchsize' must be an integer within [{}..{}].",
+                        1u64, u64::max_value()
+                    ), ClapErrorKind::InvalidValue))?,
+                }
+            } else {
+                u64::max_value()
+            };
+            let formula = {
+                let mut pb = PathBuf::new();
+                pb.push(matches.value_of("FORMULA").unwrap());
+                pb
+            };
+            let proof = {
+                let mut pb = PathBuf::new();
+                pb.push(matches.value_of("PROOF").unwrap());
+                pb
+            };
+            let temp = match matches.value_of("TEMPDIR") {
+                Some(val) => {
+                    let mut pb = PathBuf::new();
+                    pb.push(val);
+                    pb
+                },
+                None => PathBuf::from(formula.parent().unwrap_or(&formula)),
+            };
+            let output = match matches.value_of("OUTPUT") {
+                Some(val) => {
+                    let mut pb = PathBuf::new();
+                    pb.push(val);
+                    Some(pb)
+                },
+                None => None,
+            };
+            let stats = matches.is_present("STATS");
+            Ok(AppConfig::Preprocess(PreprocessingConfig {
+                cnf: formula,
+                asr: proof,
+                temp: temp,
+                output: output,
+                chunk: batchsize,
+                stats: stats,
+                integrity: None,
+                data: None,
+                preprocessing: None,
+            }))
+        } else if let Some(matches) = matches.subcommand_matches("check") {
+            let (part, total) = match matches.values_of("PART") {
+                Some(mut it) => {
+                    let part = match it.next().unwrap().parse::<u64>() {
+                        Ok(num) => num,
+                        Err(_) => Err(ClapError::with_description(&format!(
+                            "The first value for the argument '--part' must be an integer within [{}..{}].", 0u64, u64::max_value()),
+                            ClapErrorKind::InvalidValue))?,
+                    };
+                    let total = match it.next().unwrap().parse::<u64>() {
+                        Ok(num) if num >= 1u64 => num,
+                        _ => Err(ClapError::with_description(&format!(
+                            "The first value for the argument '--part' must be an integer within [{}..{}].", 1u64, u64::max_value()),
+                            ClapErrorKind::InvalidValue))?,
+                    };
+                    if part >= total {
+                        Err(ClapError::with_description(
+                            "The first value for the argument '--part' must be strictly smaller than the second value.", ClapErrorKind::InvalidValue))?;
+                    }
+                    (part, total)
+                },
+                None => (0u64, 1u64),
+            };
+            let stats = matches.is_present("STATS");
+            let permissive = matches.is_present("PERMISSIVE");
+            let formula = {
+                let mut pb = PathBuf::new();
+                pb.push(matches.value_of("FORMULA").unwrap());
+                pb
+            };
+            let proof = {
+                let mut pb = PathBuf::new();
+                pb.push(matches.value_of("PROOF").unwrap());
+                pb
+            };
+            Ok(AppConfig::Check(CheckingConfig {
+                cnf: formula,
+                asr: proof,
+                permissive: permissive,
+                select: part,
+                parts: total,
+                stats: stats,
+                integrity: None,
+                data: None,
+                correctness: None,
+            }))
+        } else {
+            Err(ClapError::with_description(&format!("No subcommand was given.",), ClapErrorKind::InvalidValue))
+        }
+    }
+}
 
-// use std::{
-//     process::{self},
-//     sync::{Mutex},
-//     panic::{self},
-//     path::{PathBuf},
-// };
+fn main() {
+    panic::set_hook(Box::new(|info| {
+        *PanicMessage.lock().unwrap() = format!("{}", info)
+    }));
+    match panic::catch_unwind(run) {
+        Ok(success) => if success {
+            process::exit(0)
+        } else {
+            process::exit(1)
+        },
+        Err(pain) => {
+            match pain.downcast::<PrintedPanic>() {
+                Ok(pp) => eprint!("{}", pp),
+                Err(_) => {
+                    fatal!("unexpected runtime error", lock, {
+                        append!(lock, "{}", PanicMessage.lock().unwrap());
+                    })
+                },
+            }
+            process::exit(101)
+        }
+    }
+}
 
-// use clap::{
-//     Arg, App, AppSettings, Error as ClapError, ErrorKind as ClapErrorKind, Result as ClapResult, SubCommand,
-// };
-
-// use tasr::{
-//     progress, fatal, panick, create_message, headed_message, append, breakline,
-//     io::{PrintedPanic},
-//     app::{PreprocessingConfig, CheckingConfig},
-// };
-
-// lazy_static! {
-//     static ref PanicMessage: Mutex<String> = {
-//         Mutex::new(String::new())
-//     };
-// }
-
-// pub enum AppConfig {
-//     Preprocess(PreprocessingConfig),
-//     Check(CheckingConfig),
-// }
-// impl AppConfig {
-//     pub fn run(self) -> bool {
-//         match self {
-//             AppConfig::Preprocess(mut config) => {
-//                 progress!("checking file integrity...", lock, {
-//                     append!(lock, "Checking the CNF file {} and raw ASR file {} for format errors and undefined references.", config.cnf.display(), config.asr.display());
-//                 });
-//                 config.integrity();
-//                 progress!("preprocessing ASR proof...", lock, {
-//                     append!(lock, "Preprocessing the raw ASR file {} into the preprocessed ASR file {} to reuse indices, trim unnecessary inferences, and reduce complex proof steps.",
-//                         config.asr.display(), config.output.as_ref().map(|x| x.display()).unwrap_or_else(|| config.asr.display()));
-//                 });
-//                 config.preprocess();
-//                 config.print_integrity_stats();
-//                 config.print_preprocessing_stats();
-//                 config.print_final_result();
-//                 config.total_errors() == 0usize
-//             },
-//             AppConfig::Check(mut config) => {
-//                 config.integrity();
-//                 config.correctness();
-//                 config.print_integrity_stats();
-//                 config.print_correctness_stats();
-//                 config.print_final_result();
-//                 config.total_errors() == 0usize
-//             },
-//         }
-//     }
-// }
-
-// struct Tasr {
-//     config: AppConfig,
-// }
-// impl Tasr {
-//     pub fn parse_cli() -> ClapResult<Tasr> {
-//         let app = Tasr::build_cli_parser();
-//         let config = Tasr::parse_cli_options(app)?;
-//         Ok(Tasr {
-//             config: config,
-//         })
-//     }
-//     pub fn run(self) -> bool {
-//         self.config.run()
-//     }
-//     fn build_cli_parser<'a, 'b>() -> App<'a, 'b> {
-//         App::new(env!("CARGO_PKG_NAME"))
-//         .setting(AppSettings::ColoredHelp)
-//         .setting(AppSettings::SubcommandRequired)
-//         .set_term_width(80usize)
-//         .version(env!("CARGO_PKG_VERSION"))
-//         .author(env!("CARGO_PKG_AUTHORS"))
-//         .about(env!("CARGO_PKG_DESCRIPTION"))
-//         .subcommand(SubCommand::with_name("preprocess")
-//             .setting(AppSettings::ColoredHelp)
-//             .about("preprocesses an ASR proof for more efficient checking")
-//             .arg(Arg::with_name("BATCHSIZE")
-//                 .long("batchsize")
-//                 .takes_value(true)
-//                 .value_name("N")
-//                 .number_of_values(1u64)
-//                 .help("number of instructions per preprocessing batch (recommended for large proofs)"))
-//             .arg(Arg::with_name("TEMPDIR")
-//                 .long("temp")
-//                 .takes_value(true)
-//                 .value_name("TEMP")
-//                 .number_of_values(1u64)
-//                 .help("path for temporary files (proof directory is used if missing)"))
-//             .arg(Arg::with_name("OUTPUT")
-//                 .long("out")
-//                 .takes_value(true)
-//                 .value_name("OUTPUT")
-//                 .number_of_values(1u64)
-//                 .help("path for output preprocessed file (proof file is overwriten if missing)"))
-//             .arg(Arg::with_name("STATS")
-//                 .long("stats")
-//                 .help("prints statistics"))
-//             .arg(Arg::with_name("FORMULA")
-//                 .index(1u64)
-//                 .required(true)
-//                 .help("path to the input CNF formula file"))
-//             .arg(Arg::with_name("PROOF")
-//                 .index(2u64)
-//                 .required(true)
-//                 .help("path to the input ASR proof file")))
-//         .subcommand(SubCommand::with_name("check")
-//             .setting(AppSettings::ColoredHelp)
-//             .about("checks an ASR proof (or a fragment thereof)")
-//             .arg(Arg::with_name("PART")
-//                 .long("--part")
-//                 .takes_value(true)
-//                 .value_names(&["N", "TOTAL"])
-//                 .number_of_values(2u64)
-//                 .help("checks only part N of TOTAL parts"))
-//             .arg(Arg::with_name("STATS")
-//                 .long("stats")
-//                 .help("prints statistics"))
-//             .arg(Arg::with_name("PERMISSIVE")
-//                 .long("--permissive")
-//                 .help("disables warnings for correct but redundant RUP chains"))
-//             .arg(Arg::with_name("FORMULA")
-//                 .index(1u64)
-//                 .required(true)
-//                 .help("path to the input CNF formula file"))
-//             .arg(Arg::with_name("PROOF")
-//                 .index(2u64)
-//                 .required(true)
-//                 .help("path to the input ASR proof file")))
-//     }
-//     fn parse_cli_options(app: App<'_, '_>) -> ClapResult<AppConfig> {
-//         let matches = app.get_matches_safe()?;
-//         if let Some(matches) = matches.subcommand_matches("preprocess") {
-//             let batchsize = if matches.is_present("BATCHSIZE") {
-//                 match matches.value_of("BATCHSIZE").unwrap().parse::<u64>() {
-//                     Ok(num) if num > 0u64 => num,
-//                     _ => Err(ClapError::with_description(&format!(
-//                         "The value for the argument '--batchsize' must be an integer within [{}..{}].",
-//                         1u64, u64::max_value()
-//                     ), ClapErrorKind::InvalidValue))?,
-//                 }
-//             } else {
-//                 u64::max_value()
-//             };
-//             let formula = {
-//                 let mut pb = PathBuf::new();
-//                 pb.push(matches.value_of("FORMULA").unwrap());
-//                 pb
-//             };
-//             let proof = {
-//                 let mut pb = PathBuf::new();
-//                 pb.push(matches.value_of("PROOF").unwrap());
-//                 pb
-//             };
-//             let temp = match matches.value_of("TEMPDIR") {
-//                 Some(val) => {
-//                     let mut pb = PathBuf::new();
-//                     pb.push(val);
-//                     pb
-//                 },
-//                 None => PathBuf::from(formula.parent().unwrap_or(&formula)),
-//             };
-//             let output = match matches.value_of("OUTPUT") {
-//                 Some(val) => {
-//                     let mut pb = PathBuf::new();
-//                     pb.push(val);
-//                     Some(pb)
-//                 },
-//                 None => None,
-//             };
-//             let stats = matches.is_present("STATS");
-//             Ok(AppConfig::Preprocess(PreprocessingConfig {
-//                 cnf: formula,
-//                 cnf_binary: false,
-//                 asr: proof,
-//                 asr_binary: false,
-//                 temp: temp,
-//                 output: output,
-//                 chunk: batchsize,
-//                 stats: stats,
-//                 integrity: None,
-//                 data: None,
-//                 preprocessing: None,
-//             }))
-//         } else if let Some(matches) = matches.subcommand_matches("check") {
-//             let (part, total) = match matches.values_of("PART") {
-//                 Some(mut it) => {
-//                     let part = match it.next().unwrap().parse::<u64>() {
-//                         Ok(num) => num,
-//                         Err(_) => Err(ClapError::with_description(&format!(
-//                             "The first value for the argument '--part' must be an integer within [{}..{}].", 0u64, u64::max_value()),
-//                             ClapErrorKind::InvalidValue))?,
-//                     };
-//                     let total = match it.next().unwrap().parse::<u64>() {
-//                         Ok(num) if num >= 1u64 => num,
-//                         _ => Err(ClapError::with_description(&format!(
-//                             "The first value for the argument '--part' must be an integer within [{}..{}].", 1u64, u64::max_value()),
-//                             ClapErrorKind::InvalidValue))?,
-//                     };
-//                     if part >= total {
-//                         Err(ClapError::with_description(
-//                             "The first value for the argument '--part' must be strictly smaller than the second value.", ClapErrorKind::InvalidValue))?;
-//                     }
-//                     (part, total)
-//                 },
-//                 None => (0u64, 1u64),
-//             };
-//             let stats = matches.is_present("STATS");
-//             let permissive = matches.is_present("PERMISSIVE");
-//             let formula = {
-//                 let mut pb = PathBuf::new();
-//                 pb.push(matches.value_of("FORMULA").unwrap());
-//                 pb
-//             };
-//             let proof = {
-//                 let mut pb = PathBuf::new();
-//                 pb.push(matches.value_of("PROOF").unwrap());
-//                 pb
-//             };
-//             Ok(AppConfig::Check(CheckingConfig {
-//                 cnf: formula,
-//                 cnf_binary: false,
-//                 asr: proof,
-//                 asr_binary: false,
-//                 permissive: permissive,
-//                 select: part,
-//                 parts: total,
-//                 stats: stats,
-//                 integrity: None,
-//                 data: None,
-//                 correctness: None,
-//             }))
-//         } else {
-//             Err(ClapError::with_description(&format!("No subcommand was given.",), ClapErrorKind::InvalidValue))
-//         }
-//     }
-// }
-
-// fn main() {
-//     panic::set_hook(Box::new(|info| {
-//         *PanicMessage.lock().unwrap() = format!("{}", info)
-//     }));
-//     match panic::catch_unwind(run) {
-//         Ok(success) => if success {
-//             process::exit(0)
-//         } else {
-//             process::exit(1)
-//         },
-//         Err(pain) => {
-//             match pain.downcast::<PrintedPanic>() {
-//                 Ok(pp) => eprint!("{}", pp),
-//                 Err(_) => {
-//                     fatal!("unexpected runtime error", lock, {
-//                         append!(lock, "{}", PanicMessage.lock().unwrap());
-//                     })
-//                 },
-//             }
-//             process::exit(101)
-//         }
-//     }
-// }
-
-// fn run() -> bool {
-//     match Tasr::parse_cli() {
-//         Ok(cfg) => cfg.run(),
-//         Err(err) => if err.use_stderr() {
-//             panick!("command-line argument error", lock, {
-//                 let s = format!("{}", err);
-//                 let n = match err.message.chars().enumerate().find(|&(_, c)| c.is_ascii_whitespace()) {
-//                     Some((n, _)) => n + 1usize,
-//                     None => 0usize,
-//                 };
-//                 append!(lock, "{}", &s[n ..]);
-//             })
-//         } else {
-//             err.exit()
-//         },
-//     }
-// }
+fn run() -> bool {
+    match Tasr::parse_cli() {
+        Ok(cfg) => cfg.run(),
+        Err(err) => if err.use_stderr() {
+            panick!("command-line argument error", lock, {
+                let s = format!("{}", err);
+                let n = match err.message.chars().enumerate().find(|&(_, c)| c.is_ascii_whitespace()) {
+                    Some((n, _)) => n + 1usize,
+                    None => 0usize,
+                };
+                append!(lock, "{}", &s[n ..]);
+            })
+        } else {
+            err.exit()
+        },
+    }
+}
 

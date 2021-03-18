@@ -1,11 +1,13 @@
 use std::{
-    io::{Result as IoResult, Write},
+    io::{Result as IoResult, Write, Read},
 };
 
 use crate::{
     basic::{ClauseIndex},
     io::{FilePosition},
     checkerdb::{ChainAddress, ClauseAddress, MultichainAddress, CheckerDb, WitnessAddress},
+    lexer::{AsrLexer},
+    parser::{AsrParser},
 };
 
 pub enum BackwardsProofInstruction {
@@ -50,6 +52,53 @@ impl BackwardsProofInstruction {
         }
         write!(wt, "0\n")
     }
+    fn binary<W: Write>(&self, db: &CheckerDb, wt: &mut W) -> IoResult<()> {
+        match self {
+            BackwardsProofInstruction::Rup(id, pos, chain_addr) => {
+                wt.write_all(&[0x01, b'r'])?;
+                id.binary(wt)?;
+                wt.write_all(&[0x01, b'l'])?;
+                pos.as_binary(wt)?;
+                for cid in db.retrieve_chain(*chain_addr) {
+                    cid.binary(wt)?;
+                }
+            },
+            BackwardsProofInstruction::Wsr(id, pos, mchain_addr) => {
+                wt.write_all(&[0x01, b'w'])?;
+                id.binary(wt)?;
+                wt.write_all(&[0x01, b'l'])?;
+                pos.as_binary(wt)?;
+                let mchain = db.retrieve_multichain(*mchain_addr);
+                for (var, lit) in db.retrieve_witness(mchain.witness()) {
+                    var.binary(wt)?;
+                    lit.binary(wt)?;
+                }
+                wt.write_all(&[0x00])?;
+                for (lat, spec) in mchain {
+                    if let Some(chain_addr) = spec {
+                        if lat != id {
+                            lat.binary(wt)?;
+                        }
+                        for cid in db.retrieve_chain(*chain_addr) {
+                            cid.binary(wt)?;
+                        }
+                        wt.write_all(&[0x00])?;
+                    }
+                }
+            },
+            BackwardsProofInstruction::Del(id, pos, clause_addr) => {
+                wt.write_all(&[0x01, b'd'])?;
+                id.binary(wt)?;
+                wt.write_all(&[0x01, b'l'])?;
+                pos.as_binary(wt)?;
+                for lit in db.retrieve_clause(*clause_addr) {
+                    lit.binary(wt)?;
+                }
+            },
+        }
+        wt.write_all(&[0x00])
+    }
+
 }
 
 pub struct BackwardsProof {
@@ -74,9 +123,16 @@ impl BackwardsProof {
     pub fn insert_del(&mut self, id: ClauseIndex, pos: FilePosition, addr: ClauseAddress) {
         self.vec.push(BackwardsProofInstruction::Del(id, pos, addr))
     }
-    pub fn write<W: Write>(&mut self, db: &CheckerDb, wt: &mut W) -> IoResult<()> {
+    pub fn write_text<W: Write>(&mut self, db: &CheckerDb, wt: &mut W) -> IoResult<()> {
         for ins in self.vec.iter().rev() {
             ins.text(db, wt)?;
+        }
+        Ok(())
+    }
+    pub fn write_binary<W: Write>(&mut self, db: &CheckerDb, wt: &mut W) -> IoResult<()> {
+        wt.write_all(&[0x00])?;
+        for ins in self.vec.iter().rev() {
+            ins.binary(db, wt)?;
         }
         Ok(())
     }
@@ -126,7 +182,7 @@ impl ForwardsProofInstruction {
                 for cid in db.retrieve_chain(*chain_addr) {
                     write!(wt, "{} ", cid.text())?;
                 }
-                write!(wt, "0\n")?;
+                write!(wt, "0\n")
             },
             ForwardsProofInstruction::Wsr(id, pos, clause_addr, mchain_addr) => {
                 write!(wt, "w {} l {} ", id.text(), pos.text())?;
@@ -152,13 +208,67 @@ impl ForwardsProofInstruction {
                         write!(wt, "{} d ", lat.text())?;
                     }
                 }
-                write!(wt, "0\n")?;
+                write!(wt, "0\n")
             },
             ForwardsProofInstruction::Del(id, pos) => {
-                write!(wt, "d {} l {} \n", id.text(), pos.text())?;
+                write!(wt, "d {} l {} \n", id.text(), pos.text())
             },
         }
-        Ok(())
+    }
+    fn binary<W: Write>(&self, db: &CheckerDb, wt: &mut W) -> IoResult<()> {
+        match self {
+            ForwardsProofInstruction::Rup(id, pos, clause_addr, chain_addr) => {
+                wt.write_all(&[0x01, b'r'])?;
+                id.binary(wt)?;
+                wt.write_all(&[0x01, b'l'])?;
+                pos.as_binary(wt)?;
+                for lit in db.retrieve_clause(*clause_addr) {
+                    lit.binary(wt)?;
+                }
+                wt.write_all(&[0x00])?;
+                for cid in db.retrieve_chain(*chain_addr) {
+                    cid.binary(wt)?;
+                }
+                wt.write_all(&[0x00])
+            },
+            ForwardsProofInstruction::Wsr(id, pos, clause_addr, mchain_addr) => {
+                wt.write_all(&[0x01, b'w'])?;
+                id.binary(wt)?;
+                wt.write_all(&[0x01, b'l'])?;
+                pos.as_binary(wt)?;
+                for lit in db.retrieve_clause(*clause_addr) {
+                    lit.binary(wt)?;
+                }
+                wt.write_all(&[0x00])?;
+                let mchain = db.retrieve_multichain(*mchain_addr);
+                for (var, lit) in db.retrieve_witness(mchain.witness()) {
+                    var.binary(wt)?;
+                    lit.binary(wt)?;
+                }
+                wt.write_all(&[0x00])?;
+                for (lat, spec) in mchain {
+                    if let Some(chain_addr) = spec {
+                        if lat != id {
+                            lat.binary(wt)?;
+                        }
+                        for cid in db.retrieve_chain(*chain_addr) {
+                            cid.binary(wt)?;
+                        }
+                        wt.write_all(&[0x00])?;
+                    } else {
+                        lat.binary(wt)?;
+                        wt.write_all(&[0x01, b'd'])?;
+                    }
+                }
+                wt.write_all(&[0x00])
+            },
+            ForwardsProofInstruction::Del(id, pos) => {
+                wt.write_all(&[0x01, b'd'])?;
+                id.binary(wt)?;
+                wt.write_all(&[0x01, b'l'])?;
+                pos.as_binary(wt)
+            },
+        }
     }
 }
 pub struct ForwardsProof {
@@ -183,9 +293,15 @@ impl ForwardsProof {
     pub fn insert_del(&mut self, id: ClauseIndex, pos: FilePosition) {
         self.vec.push(ForwardsProofInstruction::Del(id, pos))
     }
-    pub fn write<W: Write>(&mut self, db: &CheckerDb, wt: &mut W) -> IoResult<()> {
+    pub fn write_text<W: Write>(&mut self, db: &CheckerDb, wt: &mut W) -> IoResult<()> {
         for ins in self.vec.iter().rev() {
             ins.text(db, wt)?;
+        }
+        Ok(())
+    }
+    pub fn write_binary<W: Write>(&mut self, db: &CheckerDb, wt: &mut W) -> IoResult<()> {
+        for ins in self.vec.iter().rev() {
+            ins.binary(db, wt)?;
         }
         Ok(())
     }
@@ -219,5 +335,102 @@ impl ForwardsProof {
         self.delete_chain.clear();
         self.delete_witness.clear();
         self.vec.clear();
+    }
+}
+
+pub struct ProofBuffer {
+    pub vec: Vec<u8>,
+}
+impl ProofBuffer {
+    pub fn new() -> ProofBuffer {
+        let mut vec = Vec::with_capacity(1usize << 18);
+        vec.extend_from_slice(&[0x00u8, 0x01u8, b'p', b'p', b'r', b'o', b'o', b'f', 0x00u8]);
+        ProofBuffer { vec: vec }
+    }
+    pub fn core_instruction<L: AsrLexer>(&mut self, id: ClauseIndex, fp: FilePosition, asr: &mut AsrParser<L>) -> IoResult<()> {
+        let output = &mut self.vec;
+        output.write_all(&[0x01, b'k'])?;
+        id.binary(output)?;
+        output.write_all(&[0x01, b'l'])?;
+        fp.as_binary(output)?;
+        let mut clause_ps = asr.parse_clause();
+        while let Some(lit) = clause_ps.next() {
+            lit.binary(output)?;
+        }
+        output.write_all(&[0x00])
+    }
+    pub fn rup_instruction<L: AsrLexer>(&mut self, id: ClauseIndex, fp: FilePosition, asr: &mut AsrParser<L>) -> IoResult<()> {
+        let output = &mut self.vec;
+        output.write_all(&[0x01, b'r'])?;
+        id.binary(output)?;
+        output.write_all(&[0x01, b'l'])?;
+        fp.as_binary(output)?;
+        {
+            let mut clause_ps = asr.parse_clause();
+            while let Some(lit) = clause_ps.next() {
+                lit.binary(output)?;
+            }
+        }
+        output.write_all(&[0x00])?;
+        {
+            let mut chain_ps = asr.parse_chain();
+            while let Some(cid) = chain_ps.next() {
+                cid.binary(output)?;
+            }
+        }
+        output.write_all(&[0x00])
+    }
+    pub fn wsr_instruction<L: AsrLexer>(&mut self, id: ClauseIndex, fp: FilePosition, asr: &mut AsrParser<L>) -> IoResult<()> {
+        let output = &mut self.vec;
+        output.write_all(&[0x01, b'w'])?;
+        id.binary(output)?;
+        output.write_all(&[0x01, b'l'])?;
+        fp.as_binary(output)?;
+        {
+            let mut clause_ps = asr.parse_clause();
+            while let Some(lit) = clause_ps.next() {
+                lit.binary(output)?;
+            }
+        }
+        output.write_all(&[0x00])?;
+        {
+            let mut witness_ps = asr.parse_witness();
+            while let Some((var, lit)) = witness_ps.next() {
+                var.binary(output)?;
+                lit.binary(output)?;
+            }
+        }
+        output.write_all(&[0x00])?;
+        {
+            let mut mchain_ps = asr.parse_multichain(id);
+            while let Some((lid, pchain)) = mchain_ps.next() {
+                if lid != id {
+                    lid.binary(output)?;
+                }
+                match pchain {
+                    Some(mut chain_ps) => {
+                        while let Some(cid) = chain_ps.next() {
+                            cid.binary(output)?;
+                        }
+                        output.write_all(&[0x00])?;
+                    },
+                    None => output.write_all(&[0x01, b'd'])?,
+                }
+            }
+        }
+        output.write_all(&[0x00])
+    }
+    pub fn del_instruction<L: AsrLexer>(&mut self, id: ClauseIndex, fp: FilePosition, _: &mut AsrParser<L>) -> IoResult<()> {
+        let output = &mut self.vec;
+        output.write_all(&[0x01, b'd'])?;
+        id.binary(output)?;
+        output.write_all(&[0x01, b'l'])?;
+        fp.as_binary(output)
+    }
+    pub fn print(&self) {
+        println!("buffer: {:?}", self.vec);
+    }
+    pub fn reader(&self) -> &[u8] {
+        &self.vec[..]
     }
 }

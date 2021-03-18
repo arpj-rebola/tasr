@@ -1,9 +1,9 @@
 use std::{
 	fmt::{Result as FmtResult, Debug, Display, Formatter},
 	convert::{TryFrom},
-	cmp::{Ordering},
 	ops::{BitOr, BitOrAssign},
 	num::{NonZeroU32, NonZeroU64},
+	io::{Write as IoWrite, Result as IoResult},
 	mem::{self},
 };
 
@@ -39,10 +39,10 @@ impl Literal {
 	pub const fn complement(self) -> Literal {
 		Literal::new(self.val ^ 1u32)
 	}
-	/// Returns a `MaybeVariable` containing the variable underlying this literal, or `None` if the literal is top or bottom.
+	// /// Returns a `MaybeVariable` containing the variable underlying this literal, or `None` if the literal is top or bottom.
 	#[inline(always)]
-	pub fn variable(self) -> MaybeVariable {
-		unsafe { mem::transmute::<u32, MaybeVariable>(self.val & !1u32) }
+	pub fn variable(self) -> Option<Variable> {
+		unsafe { mem::transmute::<u32, Option<Variable>>(self.val & !1u32) }
 	}
 	/// Returns the ordering index of a literal.
 	#[inline(always)]
@@ -52,6 +52,28 @@ impl Literal {
 	#[inline(always)]
 	pub fn text(&self) -> TextLiteral<'_> {
 		TextLiteral(self)
+	}
+	#[inline]
+	pub fn binary<W: IoWrite>(&self, w: &mut W) -> IoResult<()> {
+		let mut num: u32 = self.val;
+		if num >= 1u32 {
+			loop {
+				let c = (num & 0b0111_1111u32) as u8;
+				num >>= 7;
+				let cont = num != 0u32;
+				w.write_all(&[c | ((cont as u8) * 0b1000_0000u8)])?;
+				if !cont {
+					return Ok(())
+				}
+			}
+		} else {
+			let letter = if num == 0u32 {
+				b'f'
+			} else {
+				b't'
+			};
+			w.write_all(&[0x01, letter])
+		}
 	}
 }
 impl TryFrom<i64> for Literal {
@@ -143,6 +165,10 @@ impl Variable {
 	pub fn text(&self) -> TextVariable<'_> {
 		TextVariable(self)
 	}
+	#[inline]
+	pub fn binary<W: IoWrite>(&self, w: &mut W) -> IoResult<()> {
+		self.positive().binary(w)
+	}
 }
 impl TryFrom<i64> for Variable {
 	type Error = i64;
@@ -185,102 +211,6 @@ impl<'a> Display for TextVariable<'a> {
 	}
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct MaybeVariable {
-    val: Option<Variable>,
-}
-impl MaybeVariable {
-	#[inline(always)]
-	pub const fn new(val: Option<Variable>) -> MaybeVariable {
-		MaybeVariable { val: val }
-	}
-	#[inline(always)]
-	pub const fn get(self) -> Option<Variable> {
-		self.val
-	}
-	#[inline(always)]
-	pub fn text(&self) -> TextMaybeVariable<'_> {
-		TextMaybeVariable(self)
-	}
-}
-impl TryFrom<i64> for MaybeVariable {
-	type Error = i64;
-	fn try_from(num: i64) -> Result<MaybeVariable, i64> {
-		if num >= 0i64 && num <= Variable::MaxValue {
-			unsafe { Ok(mem::transmute::<u32, MaybeVariable>((num as u32) << 1)) }
-		} else {
-			Err(num)
-		}
-	}
-}
-impl PartialOrd for MaybeVariable {
-	#[inline(always)]
-    fn partial_cmp(&self, oth: &MaybeVariable) -> Option<Ordering> {
-        unsafe { mem::transmute::<&MaybeVariable, &u32>(self).partial_cmp(mem::transmute::<&MaybeVariable, &u32>(oth)) }
-    }
-}
-impl Ord for MaybeVariable {
-	#[inline(always)]
-    fn cmp(&self, oth: &MaybeVariable) -> Ordering {
-		unsafe { mem::transmute::<&MaybeVariable, &u32>(self).cmp(mem::transmute::<&MaybeVariable, &u32>(oth)) }
-    }
-}
-impl BitOr<MaybeVariable> for MaybeVariable {
-	type Output = MaybeVariable;
-	#[inline(always)]
-	fn bitor(self, var: MaybeVariable) -> MaybeVariable {
-		unsafe { mem::transmute::<u32, MaybeVariable>(mem::transmute::<MaybeVariable, u32>(self).max(mem::transmute::<MaybeVariable, u32>(var))) }
-	}
-}
-impl BitOr<Variable> for MaybeVariable {
-	type Output = MaybeVariable;
-	#[inline(always)]
-	fn bitor(self, var: Variable) -> MaybeVariable {
-		unsafe { mem::transmute::<u32, MaybeVariable>(mem::transmute::<MaybeVariable, u32>(self).max(mem::transmute::<Variable, u32>(var))) }
-	}
-}
-impl BitOr<Literal> for MaybeVariable {
-	type Output = MaybeVariable;
-	#[inline(always)]
-	fn bitor(self, lit: Literal) -> MaybeVariable {
-		unsafe { mem::transmute::<u32, MaybeVariable>(mem::transmute::<MaybeVariable, u32>(self).max(mem::transmute::<Literal, u32>(lit) & !1u32)) }
-	}
-}
-impl BitOrAssign<MaybeVariable> for MaybeVariable {
-	#[inline(always)]
-	fn bitor_assign(&mut self, var: MaybeVariable) {
-		*self = unsafe { mem::transmute::<u32, MaybeVariable>(mem::transmute::<MaybeVariable, u32>(*self).max(mem::transmute::<MaybeVariable, u32>(var))) }
-	}
-}
-impl BitOrAssign<Variable> for MaybeVariable {
-	#[inline(always)]
-	fn bitor_assign(&mut self, var: Variable) {
-		*self = unsafe { mem::transmute::<u32, MaybeVariable>(mem::transmute::<MaybeVariable, u32>(*self).max(mem::transmute::<Variable, u32>(var))) }
-	}
-}
-impl BitOrAssign<Literal> for MaybeVariable {
-	#[inline(always)]
-	fn bitor_assign(&mut self, lit: Literal) {
-		*self = unsafe { mem::transmute::<u32, MaybeVariable>(mem::transmute::<MaybeVariable, u32>(*self).max(mem::transmute::<Literal, u32>(lit) & !1u32)) }
-	}
-}
-impl Display for MaybeVariable {
-	fn fmt(&self , f: &mut Formatter<'_>) -> FmtResult {
-		unsafe { write!(f, "{}", mem::transmute::<&MaybeVariable, &u32>(self) >> 1) }
-	}
-}
-
-pub struct TextMaybeVariable<'a>(&'a MaybeVariable);
-impl<'a> Display for TextMaybeVariable<'a> {
-	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-		match self.0.val {
-			Some(var) => write!(f, "{}", var),
-			None => write!(f, "0"),
-		}
-	}
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct ClauseIndex {
@@ -298,6 +228,19 @@ impl ClauseIndex {
 	#[inline(always)]
 	pub fn text(&self) -> TextClauseIndex<'_> {
 		TextClauseIndex(self)
+	}
+	#[inline]
+	pub fn binary<W: IoWrite>(&self, w: &mut W) -> IoResult<()> {
+		let mut num: u64 = self.val.get() << 1;
+		loop {
+			let c = (num & 0b0111_1111u64) as u8;
+			num >>= 7;
+			let cont = num != 0u64;
+			w.write_all(&[c | ((cont as u8) * 0b1000_0000u8)])?;
+			if !cont {
+				return Ok(())
+			}
+		}
 	}
 }
 impl TryFrom<i64> for ClauseIndex {
@@ -328,119 +271,6 @@ impl<'a> Display for TextClauseIndex<'a> {
 	}
 }
 
-// pub struct ClauseIndexEnumerator {
-// 	val: u64,
-// }
-// impl ClauseIndexEnumerator {
-// 	fn new() -> ClauseIndexEnumerator {
-// 		ClauseIndexEnumerator { val: 0u64 }
-// 	}
-// }
-// impl Iterator for ClauseIndexEnumerator {
-// 	type Item = ClauseIndexEnumerator;
-// 	fn next(&mut self) -> Option<ClauseIndex> {
-// 		if self.val <= ClauseIndex::MaxValue as u64 {
-// 			self.val += 1u64;
-// 			unsafe { ClauseIndex { val: NonZeroU64::new_unchecked(self.val) } }
-// 		} else {
-// 			None
-// 		}
-// 	}
-// }
-// impl From<ClauseIndex> for ClauseIndexEnumerator {
-// 	fn from(id: ClauseIndex) -> ClauseIndexEnumerator {
-// 		ClauseIndexEnumerator { val: id.val.get() }
-// 	}
-// }
-
-// #[derive(Copy, Clone, Debug)]
-// #[repr(transparent)]
-// pub struct MaybeClauseIndex {
-//     val: u64,
-// }
-// impl MaybeClauseIndex {
-// 	#[inline(always)]
-// 	pub const fn new(val: Option<ClauseIndex>) -> MaybeClauseIndex {
-// 		MaybeClauseIndex {
-// 			val: unsafe { mem::transmute::<Option<ClauseIndex>, u64>(val) }
-// 		}
-// 	}
-// 	#[inline(always)]
-// 	pub const fn get(self) -> Option<ClauseIndex> {
-// 		self.val
-// 	}
-// 	// #[inline(always)]
-// 	// pub unsafe fn succ(self) -> MaybeClauseIndex {
-// 	// 	mem::transmute::<u32, MaybeClauseIndex>(mem::transmute::<MaybeClauseIndex, u32>(self) + 1u32)
-// 	// }
-// 	#[inline(always)]
-// 	pub fn text(&self) -> TextMaybeClauseIndex<'_> {
-// 		TextMaybeClauseIndex(self)
-// 	}
-// }
-// impl TryFrom<i64> for MaybeClauseIndex {
-// 	type Error = i64;
-// 	fn try_from(num: i64) -> Result<MaybeClauseIndex, i64> {
-// 		if num >= 0i64 && num <= ClauseIndex::MaxValue {
-// 			unsafe { Ok(mem::transmute::<u64, MaybeClauseIndex>(num as u64)) }
-// 		} else {
-// 			Err(num)
-// 		}
-// 	}
-// }
-// impl BitOr<MaybeClauseIndex> for MaybeClauseIndex {
-// 	type Output = MaybeClauseIndex;
-// 	fn bitor(self, mid: MaybeClauseIndex) -> MaybeClauseIndex {
-// 		unsafe { mem::transmute::<u64, MaybeClauseIndex>(mem::transmute::<MaybeClauseIndex, u64>(self) | mem::transmute::<MaybeClauseIndex, u64>(mid)) }
-// 	}
-// }
-// impl BitOr<ClauseIndex> for MaybeClauseIndex {
-// 	type Output = MaybeClauseIndex;
-// 	fn bitor(self, id: ClauseIndex) -> MaybeClauseIndex {
-// 		unsafe { mem::transmute::<u64, MaybeClauseIndex>(mem::transmute::<MaybeClauseIndex, u64>(self) | mem::transmute::<ClauseIndex, u64>(id)) }
-// 	}
-// }
-// impl Display for MaybeClauseIndex {
-// 	fn fmt(&self , f: &mut Formatter<'_>) -> FmtResult {
-// 		write!(f, "{}", unsafe { mem::transmute::<&MaybeClauseIndex, &u64>(self) })
-// 	}
-// }
-
-// pub struct TextMaybeClauseIndex<'a>(&'a MaybeClauseIndex);
-// impl<'a> Display for TextMaybeClauseIndex<'a> {
-// 	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-// 		match self.0.val {
-// 			Some(id) => write!(f, "{}", id.text()),
-// 			None => write!(f, "0"),
-// 		}
-// 	}
-// }
-
-// #[derive(Copy, Clone, PartialEq, Eq)]
-// pub enum InstructionNumberKind {
-// 	Premise,
-// 	Core,
-// 	Proof,
-// }
-// impl InstructionNumberKind {
-// 	fn section(&self) -> &str {
-// 		match self {
-// 			InstructionNumberKind::Premise => "premise",
-// 			InstructionNumberKind::Core => "core",
-// 			InstructionNumberKind::Proof => "proof",
-// 		}
-// 	}
-// }
-// impl Display for InstructionNumberKind {
-// 	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-// 		match self {
-// 			InstructionNumberKind::Premise => write!(f, "premise clause"),
-// 			InstructionNumberKind::Core => write!(f, "core clause"),
-// 			InstructionNumberKind::Proof => write!(f, "proof instruction"),
-// 		}
-// 	}
-// }
-
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct InstructionNumber {
 	val: u64
@@ -459,27 +289,30 @@ impl InstructionNumber {
 			Err(n)
 		}
 	}
+	#[inline]
 	pub fn new_premise() -> InstructionNumber {
 		InstructionNumber { val: InstructionNumber::PremiseKind }
 	}
+	#[inline]
 	pub fn new_core() -> InstructionNumber {
 		InstructionNumber { val: InstructionNumber::CoreKind }
 	}
+	#[inline]
 	pub fn new_buffer() -> InstructionNumber {
 		InstructionNumber { val: InstructionNumber::BufferKind }
 	}
+	#[inline]
 	pub fn new_proof() -> InstructionNumber {
 		InstructionNumber { val: InstructionNumber::ProofKind }
 	}
+	#[inline]
 	pub fn next(&mut self) {
 		self.val += 0b1u64;
 	}
+	#[inline]
 	pub fn increase(&mut self, inc: u64) {
 		self.val += inc & InstructionNumber::NumberMask
 	}
-	// pub fn text(&self) -> TextInstructionNumber<'_> {
-	// 	TextInstructionNumber::<'_>(self)
-	// }
 }
 impl Display for InstructionNumber {
 	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
@@ -493,130 +326,6 @@ impl Display for InstructionNumber {
 		write!(f, "{} {}", kind, InstructionNumber::NumberMask & self.val)
 	}
 }
-
-// pub struct TextInstructionNumber<'a>(&'a InstructionNumber);
-// impl<'a> Display for TextInstructionNumber<'a> {
-// 	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-// 		let kind = match self.0.val & 0b11u64 {
-// 			InstructionNumber::ProofKind => 'i',
-// 			InstructionNumber::CoreKind => 'k',
-// 			InstructionNumber::PremiseKind => 'o',
-// 			_ => return Ok(()),
-// 		};
-// 		write!(f, "{} {}", kind, self.0.val >> 2)
-// 	}
-// }
-
-
-
-// #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-// #[repr(transparent)]
-// pub struct InstructionNumber {
-//     val: u64,
-// }
-// impl InstructionNumber {
-// 	pub const MaxValue: i64 = !InstructionNumber::Flags as i64;
-// 	const ProofFlag: u64 = 0b10u64 << 62;
-// 	const CoreFlag: u64 = 0b01u64 << 62;
-// 	const Flags: u64 = InstructionNumber::ProofFlag | InstructionNumber::CoreFlag;
-// 	pub fn new(kind: InstructionNumberKind) -> InstructionNumber {
-// 		InstructionNumber { val: match kind {
-// 			InstructionNumberKind::Premise => 0b00u64,
-// 			InstructionNumberKind::Core => 0b01u64,
-// 			InstructionNumberKind::Proof => 0b11u64,
-// 		} << 62 }
-// 	}
-// 	pub fn kind(&self) -> InstructionNumberKind {
-// 		if self.val >= InstructionNumber::Flags {
-// 			InstructionNumberKind::Proof
-// 		} else if self.val >= InstructionNumber::CoreFlag {
-// 			InstructionNumberKind::Core
-// 		}  else {
-// 			InstructionNumberKind::Premise
-// 		}
-// 	}
-// 	pub fn succ(self) -> Option<InstructionNumber> {
-// 		if self.val & !InstructionNumber::Flags != !InstructionNumber::Flags {
-// 			Some(InstructionNumber { val: self.val + 1u64 })
-// 		} else {
-// 			None
-// 		}
-// 	}
-// 	pub fn number(&self) -> u64 {
-// 		self.val & !InstructionNumber::Flags
-// 	}
-// 	#[inline(always)]
-// 	pub fn text(&self) -> TextInstructionNumber<'_> {
-// 		TextInstructionNumber(self)
-// 	}
-// 	pub fn is_break(&self, div: NonZeroU64) -> bool {
-// 		self.val & InstructionNumber::Flags == InstructionNumber::Flags && (self.val & !InstructionNumber::Flags) % div.get() == 0u64
-// 	}
-// }
-// impl Display for InstructionNumber {
-// 	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-// 		if self.val >= InstructionNumber::ProofFlag {
-// 			write!(f, "proof instruction #{}", self.val & !InstructionNumber::Flags)
-// 		} else if self.val >= InstructionNumber::CoreFlag {
-// 			write!(f, "core clause #{}", self.val & !InstructionNumber::Flags)
-// 		} else {
-// 			write!(f, "premise clause #{}", self.val & !InstructionNumber::Flags)
-// 		}
-// 	}
-// }
-
-// impl TryFrom<(InstructionNumberKind, i64)> for InstructionNumber {
-// 	type Error = i64;
-// 	fn try_from(pair: (InstructionNumberKind, i64)) -> Result<InstructionNumber, i64> {
-// 		if pair.1 > 0i64 && pair.1 <= InstructionNumber::MaxValue {
-// 			Ok(InstructionNumber { val: pair.1 as u64 | match pair.0 {
-// 				InstructionNumberKind::Premise => 0u64,
-// 				InstructionNumberKind::Core => InstructionNumber::CoreFlag,
-// 				InstructionNumberKind::Proof => InstructionNumber::Flags,
-// 			} })
-// 		} else {
-// 			Err(pair.1)
-// 		}
-// 	}
-// }
-// impl TryFrom<(InstructionNumberKind, u64)> for InstructionNumber {
-// 	type Error = u64;
-// 	fn try_from(pair: (InstructionNumberKind, u64)) -> Result<InstructionNumber, u64> {
-// 		if pair.1 > 0u64 && pair.1 <= InstructionNumber::MaxValue as u64 {
-// 			Ok(InstructionNumber { val: pair.1 | match pair.0 {
-// 				InstructionNumberKind::Premise => 0u64,
-// 				InstructionNumberKind::Core => InstructionNumber::CoreFlag,
-// 				InstructionNumberKind::Proof => InstructionNumber::Flags,
-// 			} })
-// 		} else {
-// 			Err(pair.1)
-// 		}
-// 	}
-// }
-// impl PartialOrd for InstructionNumber {
-// 	fn partial_cmp(&self, other: &InstructionNumber) -> Option<Ordering> {
-// 		self.val.partial_cmp(&other.val)
-// 	}
-// }
-// impl Ord for InstructionNumber {
-// 	fn cmp(&self, other: &InstructionNumber) -> Ordering {
-// 		self.val.cmp(&other.val)
-// 	}
-// }
-
-// pub struct TextInstructionNumber<'a>(&'a InstructionNumber);
-// impl<'a> Display for TextInstructionNumber<'a> {
-// 	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-// 		if self.0.val >= InstructionNumber::ProofFlag {
-// 			write!(f, "i {}", self.0.val & !InstructionNumber::Flags)
-// 		} else if self.0.val >= InstructionNumber::CoreFlag {
-// 			write!(f, "k {}", self.0.val & !InstructionNumber::Flags)
-// 		} else {
-// 			write!(f, "o {}", self.0.val & !InstructionNumber::Flags)
-// 		}
-// 	}
-// }
-
 
 #[cfg(test)]
 pub mod test {

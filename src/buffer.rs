@@ -5,7 +5,7 @@ use std::{
 use crate::{
     basic::{Literal, ClauseIndex, Variable},
     checkerdb::{Clause, Chain, Witness, Multichain, ChainAddress, WitnessAddress},
-    model::{Model},
+    model::{Model, ModelValue},
     substitution::{Substitution, SubstitutionInsertion},
     idflags::{ClauseIndexFlags},
 };
@@ -33,16 +33,18 @@ impl ClauseBuffer {
             self.truth |= 0b10u8;
         }
         self.vec.push(lit);
-        let mm = model.check_force(lit);
-        if !mm.is_unassigned() {
-            let pos = self.vec.len() - 1usize;
-            if mm.is_true() {
-                self.repetitions.push(pos);
-            }
-            if mm.is_false() {
-                self.conflicts.push(pos);
-                self.truth |= 0b10u8;
-            }
+        let val = model.check_set(lit);
+        if let ModelValue::Unassigned = val { } else {
+            self.process_error(val);
+        }
+    }
+    fn process_error(&mut self, val: ModelValue) {
+        let pos = self.vec.len() - 1usize;
+        if let ModelValue::True = val {
+            self.repetitions.push(pos);
+        } else {
+            self.conflicts.push(pos);
+            self.truth |= 0b10u8;
         }
     }
     pub fn is_ok(&self) -> bool {
@@ -102,7 +104,7 @@ impl ClauseBuffer {
             }
             self.vec.clear();
             self.vec.push(Literal::Top);
-            model.force(Literal::Top);
+            model.set(Literal::Top);
         } else {
             let mut reps = self.repetitions.iter();
             let mut i = self.vec.as_ptr();

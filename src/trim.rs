@@ -1,6 +1,6 @@
 use std::{
     mem::{self},
-    io::{Write, Result as IoResult, Read},
+    io::{Write, Result as IoResult},
 };
 
 use crate::{
@@ -11,7 +11,8 @@ use crate::{
     proof::{ForwardsProof},
     split::{SplitterData, PreprocessingStats},
     io::{FilePosition},
-    textparser::{PrepParsedInstructionKind, PrepParsedInstruction, TextAsrParser, TextChainParser, TextClauseParser, TextWitnessParser},
+    lexer::{AsrLexer},
+    parser::{AsrParser, AsrClauseParser, AsrChainParser, AsrWitnessParser, ParsedInstructionKind, ParsedInstruction},
 };
 
 pub struct Trimmer {
@@ -44,12 +45,12 @@ impl Trimmer {
             stats: data.stats,
         }
     }
-    pub fn process<R: Read>(&mut self, mut asr: TextAsrParser<R>) -> TrimmedFragment<'_> {
+    pub fn process<L: AsrLexer>(&mut self, mut asr: AsrParser<L>) -> TrimmedFragment<'_> {
         while let Some(ins) = asr.parse_instruction(false, true) {
             match ins.kind() {
-                PrepParsedInstructionKind::Rup => self.process_rup_instruction(&mut asr, &ins),
-                PrepParsedInstructionKind::Del => self.process_del_instruction(&mut asr, &ins),
-                PrepParsedInstructionKind::Wsr => self.process_wsr_instruction(&mut asr, &ins),
+                ParsedInstructionKind::Rup => self.process_rup_instruction(&mut asr, &ins),
+                ParsedInstructionKind::Del => self.process_del_instruction(&mut asr, &ins),
+                ParsedInstructionKind::Wsr => self.process_wsr_instruction(&mut asr, &ins),
                 _ => (),
             }
         }
@@ -58,12 +59,16 @@ impl Trimmer {
             proof: &mut self.proof,
         }
     }
-    pub fn core<W: Write>(mut self, wt: &mut W) -> PreprocessingStats {
-        self.process_cores(wt).unwrap_or_else(|e| panic!(format!("{}", e)));
+    pub fn core<W: Write>(mut self, wt: &mut W, binary: bool) -> PreprocessingStats {
+        if binary {
+            self.process_cores_binary(wt)
+        } else {
+            self.process_cores_text(wt)
+        }.unwrap_or_else(|e| panic!(format!("{}", e)));
         self.stats.record_trim_time();
         self.stats
     }
-    fn process_rup_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
+    fn process_rup_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let id = *ins.index();
         let ((pos, clause_addr), flags) = self.idflags.take(id).unwrap();
         if flags.has_check_schedule() {
@@ -76,7 +81,7 @@ impl Trimmer {
             mem::drop(asr.parse_chain());
         }
     }
-    fn process_wsr_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
+    fn process_wsr_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let id = *ins.index();
         if self.idflags.flags(id).unwrap().has_check_schedule() {
             let witness_addr = self.process_witness(asr.parse_witness());
@@ -101,13 +106,13 @@ impl Trimmer {
             mem::drop(asr.parse_multichain(id));
         }
     }
-    fn process_del_instruction<R: Read>(&mut self, asr: &mut TextAsrParser<R>, ins: &PrepParsedInstruction) {
+    fn process_del_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let id = ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
         let pos = ins.default_position();
         self.idflags.insert(*id, (pos, clause_addr)).unwrap();
     }
-    fn process_clause<R: Read>(&mut self, mut ps: TextClauseParser<'_, R>) -> ClauseAddress {
+    fn process_clause<L: AsrLexer>(&mut self, mut ps: AsrClauseParser<'_, L>) -> ClauseAddress {
         while let Some(lit) = ps.next() {
             self.clause.push(lit);
         }
@@ -115,7 +120,7 @@ impl Trimmer {
         self.clause.clear();
         addr
     }
-    fn process_chain<R: Read>(&mut self, mut ps: TextChainParser<'_, R>) -> ChainAddress {
+    fn process_chain<L: AsrLexer>(&mut self, mut ps: AsrChainParser<'_, L>) -> ChainAddress {
         while let Some(cid) = ps.next() {
             self.chain.push(cid);
             if !self.idflags.flags_mut(cid).unwrap().has_check_schedule() {
@@ -126,7 +131,7 @@ impl Trimmer {
         self.chain.clear();
         addr
     }
-    fn process_witness<R: Read>(&mut self, mut ps: TextWitnessParser<'_, R>) -> WitnessAddress {
+    fn process_witness<L: AsrLexer>(&mut self, mut ps: AsrWitnessParser<'_, L>) -> WitnessAddress {
         while let Some((var, lit)) = ps.next() {
             self.witness.push(var, lit);
         }
@@ -154,7 +159,7 @@ impl Trimmer {
         }
         self.dels.clear();
     }
-    fn process_cores<W: Write>(&mut self, wt: &mut W) -> IoResult<()> {
+    fn process_cores_text<W: Write>(&mut self, wt: &mut W) -> IoResult<()> {
         for (id, ((pos, clause_addr), flags)) in self.idflags.clauses() {
             if flags.has_check_schedule() {
                 write!(wt, "k {} l {} ", id.text(), pos.text())?;
@@ -167,6 +172,22 @@ impl Trimmer {
         }
         Ok(())
     }
+    fn process_cores_binary<W: Write>(&mut self, wt: &mut W) -> IoResult<()> {
+        for (id, ((pos, clause_addr), flags)) in self.idflags.clauses() {
+            if flags.has_check_schedule() {
+                wt.write_all(&[0x01, b'k'])?;
+                id.binary(wt)?;
+                wt.write_all(&[0x01, b'l'])?;
+                pos.as_binary(wt)?;
+                for &lit in self.db.retrieve_clause(*clause_addr) {
+                    lit.binary(wt)?;
+                }
+                wt.write_all(&[0x00])?;
+                self.stats.new_core();
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct TrimmedFragment<'a> {
@@ -174,8 +195,13 @@ pub struct TrimmedFragment<'a> {
     proof: &'a mut ForwardsProof,
 }
 impl<'a> TrimmedFragment<'a> {
-    pub fn dump<W: Write>(mut self, wt: &mut W) {
-        self.proof.write(&mut self.db, wt).unwrap_or_else(|e| panic!(format!("{}", e)));
+    #[inline]
+    pub fn dump<W: Write>(mut self, wt: &mut W, binary: bool) {
+        if binary {
+            self.proof.write_binary(&mut self.db, wt)
+        } else {
+            self.proof.write_text(&mut self.db, wt)
+        }.unwrap_or_else(|e| panic!(format!("{}", e)));
     }
 }
 impl<'a> Drop for TrimmedFragment<'a> {

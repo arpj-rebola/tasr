@@ -124,7 +124,7 @@ impl<'a> RupChecker<'a> {
             let mut prop = Literal::Bottom;
             let mut it = clause.into_iter();
             while let Some(&lit) = it.next() {
-                match unsafe { self.checker.model.value(lit) } {
+                match self.checker.model.value(lit) {
                     ModelValue::False => (),
                     ModelValue::Unassigned if prop == Literal::Bottom => prop = lit,
                     _ => return permissive,
@@ -199,7 +199,7 @@ impl<'a> ExplicitChecker<'a> {
             let mut prop = Literal::Bottom;
             let mut it = clause.into_iter();
             loop { match it.next() {
-                Some(&lit) => match unsafe { self.checker.model.value(lit) } {
+                Some(&lit) => match self.checker.model.value(lit) {
                     ModelValue::False => (),
                     ModelValue::Unassigned => if prop == Literal::Bottom {
                         prop = lit;

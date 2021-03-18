@@ -5,7 +5,7 @@ use std::{
     sync::{Mutex},
 };
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct FilePosition {
     /// The first LSB marks whether this file is binary.
     /// The second LSB marks whether EOF has been reached.
@@ -48,6 +48,18 @@ impl FilePosition {
     }
     pub fn text(&self) -> FilePositionText<'_> {
         FilePositionText(self)
+    }
+    pub fn as_binary<W: Write>(&self, w: &mut W) -> IoResult<()> {
+		let mut num: u64 = self.val << 1;
+		loop {
+			let c = (num & 0b0111_1111u64) as u8;
+			num >>= 7;
+			let cont = num != 0u64;
+			w.write_all(&[c | ((cont as u8) * 0b1000_0000u8)])?;
+			if !cont {
+				return Ok(())
+			}
+		}
     }
     pub fn with_path(self, path: &Path) -> PathFilePosition {
         PathFilePosition {
@@ -193,24 +205,24 @@ impl<R> Iterator for InputReader<R> where
 }
 
 /// Writes to a buffered output sink identified through a path, and manages panics on error.
-pub struct OutputWriter<'a> {
+pub struct OutputWriter<'a, W: Write> {
     /// Buffered writer
-    buf: BufWriter<Box<dyn 'a + Write>>,
+    buf: BufWriter<W>,
     /// Identifying path
     path: &'a Path,
 }
-impl<'a> OutputWriter<'a> {
-	pub fn new<'b: 'a, W: 'b + Write>(wt: W, path: &'b Path) -> OutputWriter<'a> {
-		OutputWriter::<'a>::with_capacity(wt, path, !(!0usize << 16))
+impl<'a, W: Write> OutputWriter<'a, W> {
+	pub fn new(wt: W, path: &'a Path) -> OutputWriter<'a, W> {
+		OutputWriter::<'a, W>::with_capacity(wt, path, 1usize << 20)
     }
-    pub fn with_capacity<'b: 'a, W: 'b + Write>(wt: W, path: &'b Path, cap: usize) -> OutputWriter<'a> {
+    pub fn with_capacity(wt: W, path: &'a Path, cap: usize) -> OutputWriter<'a, W> {
 		OutputWriter::<'a> {
-            buf: BufWriter::with_capacity(cap, Box::new(wt)),
+            buf: BufWriter::with_capacity(cap, wt),
             path: path,
 		}
     }
 }
-impl<'a> Write for OutputWriter<'a> {
+impl<'a, W: Write> Write for OutputWriter<'a, W> {
 	fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
 		Ok(self.buf.write(buf).unwrap_or_else(|err| panic!(format!("{}", err))))
 	}

@@ -4,7 +4,7 @@ use std::{
 
 use crate::{
     basic::{Literal},
-    model::{Model},
+    model::{Model, ModelValue},
     checkerdb::{CheckerDb, Clause, ClauseAddress},
 };
 
@@ -96,7 +96,10 @@ impl ClauseSet {
             Some((n, &(target_addr, target_sub))) => if target_sub == sub {
                 let target_clause = db.retrieve_clause(target_addr);
                 if target_clause.length() == length {
-                    if target_clause.into_iter().all(|&lit| model.member(lit).is_true()) {
+                    if target_clause.into_iter().all(|&lit| match model.value(lit) {
+                        ModelValue::True => true,
+                        _ => false,
+                    }) {
                         break Some(n)
                     }
                 }

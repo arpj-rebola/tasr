@@ -2,7 +2,7 @@
 #![feature(map_first_last)]
 #![feature(maybe_uninit_ref)]
 #![feature(ptr_offset_from)]
-#![feature(test)]
+#![feature(core_intrinsics)]
 #![allow(non_upper_case_globals)]
 #![allow(incomplete_features)]
 #![allow(dead_code)]
@@ -13,8 +13,9 @@ extern crate lazy_static;
 
 #[macro_use]
 pub mod io;
-pub mod textparser;
 pub mod basic;
+pub mod lexer;
+pub mod parser;
 pub mod database;
 pub mod substitution;
 pub mod model;

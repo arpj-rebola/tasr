@@ -378,7 +378,6 @@ impl IntegrityVerifier {
         let mut temp_path = PathBuf::from("(buffer)");
         mem::swap(&mut self.original, &mut temp_path);
         mem::swap(&mut self.deferred, &mut temp_path);
-        buffer.print();
         // Check the ASR proof fragment corresponding to the buffer.
         let buffer_input = InputReader::new(buffer.reader(), &self.original, false);
         let mut buffer_ps = AsrParser::new(UnbufferedAsrBinaryLexer::new(buffer_input));

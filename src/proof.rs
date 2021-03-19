@@ -427,9 +427,6 @@ impl ProofBuffer {
         output.write_all(&[0x01, b'l'])?;
         fp.as_binary(output)
     }
-    pub fn print(&self) {
-        println!("buffer: {:?}", self.vec);
-    }
     pub fn reader(&self) -> &[u8] {
         &self.vec[..]
     }

@@ -74,13 +74,9 @@ impl Model {
 
 #[cfg(test)]
 pub mod test {
-    use std::{
-        mem::{self},
-        convert::{TryFrom},
-    };
-    use rand::{self, Rng};
+    use rand::{self};
 	use crate::{
-        basic::{Literal, test::{generate_literal,}},
+        basic::{test::{generate_literal}},
         model::{Model, ModelValue},
     };
 

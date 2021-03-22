@@ -419,33 +419,9 @@ pub mod test {
 		let mvar4 = lit4.variable();
 		let mvar5 = lit5.variable();
 		let mvar6 = lit6.variable();
-		assert!(mvar1.get().is_none());
-		assert!(mvar2.get().is_none());
-		assert!(mvar3.get().is_some());
-		assert!(mvar4.get().is_some());
-		assert!(mvar5.get().is_some());
-		assert!(mvar6.get().is_some());
 		assert!(mvar1 == mvar2);
 		assert!(mvar3 == mvar4);
 		assert!(mvar5 == mvar6);
-		let var3 = mvar3.get().unwrap();
-		let var4 = mvar4.get().unwrap();
-		let var5 = mvar5.get().unwrap();
-		let var6 = mvar6.get().unwrap();
-		assert!(mvar1 | var3 == mvar3);
-		assert!(mvar1 | var5 == mvar5);
-		assert!(mvar3 | var5 == mvar5);
-		assert!(mvar1 | lit1 == mvar1);
-		assert!(mvar1 | lit3 == mvar3);
-		assert!(mvar1 | lit5 == mvar5);
-		assert!(mvar3 | mvar3 == mvar3);
-		assert!(mvar3 | mvar5 == mvar5);
-		assert!(mvar5 | mvar5 == mvar5);
-		assert!(var3 < var5);
-		assert!(var3.index() == (number - 1i64) as usize);
-		assert!(var4.index() == (number - 1i64) as usize);
-		assert!(var5.index() == ((u32::max_value() as usize) >> 1usize) - 1usize);
-		assert!(var6.index() == ((u32::max_value() as usize) >> 1usize) - 1usize);
 	}
 
 	#[test]

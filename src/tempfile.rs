@@ -71,7 +71,7 @@ impl TempFiles {
                 Err(err) => TempFiles::opening_error(&path, err),
             };
             if core {
-                wt.write_all(&[0x00, 0x01, b'p', b's', b'o', b'u', b'r', b'c', b'e', 0x00, b'"']).unwrap_or_else(|err| panic!(format!("{}", err)));
+                wt.write_all(&[0x00, 0x01, b'p', b's', b'o', b'u', b'r', b'c', b'e', 0x00, 0x01, b'"']).unwrap_or_else(|err| panic!(format!("{}", err)));
                 write!(wt, "{}\"", source.to_string_lossy().escape_default()).unwrap_or_else(|err| panic!(format!("{}", err)));
                 wt.write_all(&[0x01, b'p', b'c', b'o', b'u', b'n', b't', 0x00]).unwrap_or_else(|err| panic!(format!("{}", err)));
                 let mut num: u64 = count << 1;

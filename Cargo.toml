@@ -26,6 +26,6 @@ codegen-units = 1
 name = "tasr"
 path = "src/bin/main.rs"
 
-[[bin]]
-name = "benchmarks"
-path = "src/benchmarks/benchmarking.rs"
+# [[bin]]
+# name = "benchmarks"
+# path = "src/benchmarks/benchmarking.rs"

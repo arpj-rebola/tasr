@@ -88,7 +88,7 @@ impl TempFiles {
             }
             io::copy(&mut file, wt).unwrap_or_else(|err| panic!(format!("{}", err)));
             if core {
-                wt.write_all(&[0x01, b'p', b'p', b'r', b'o', b'o', b'f']).unwrap_or_else(|err| panic!(format!("{}", err)));
+                wt.write_all(&[0x01, b'p', b'p', b'r', b'o', b'o', b'f', 0x00]).unwrap_or_else(|err| panic!(format!("{}", err)));
             }
             core = false;
             if path.exists() {

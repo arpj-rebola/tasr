@@ -1,5 +1,5 @@
 use std::{
-    io::{Result as IoResult, Write, Read},
+    io::{Result as IoResult, Write},
 };
 
 use crate::{

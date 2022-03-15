@@ -199,7 +199,7 @@ impl<R> Iterator for InputReader<R> where
                 self.pos.finish();
                 None
             },
-            Some(Err(err)) => panic!(format!("{}", err)),
+            Some(Err(err)) => panic!("{}", err),
         }
 	}
 }
@@ -224,10 +224,10 @@ impl<'a, W: Write> OutputWriter<'a, W> {
 }
 impl<'a, W: Write> Write for OutputWriter<'a, W> {
 	fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-		Ok(self.buf.write(buf).unwrap_or_else(|err| panic!(format!("{}", err))))
+		Ok(self.buf.write(buf).unwrap_or_else(|err| panic!("{}", err)))
 	}
 	fn flush(&mut self) -> IoResult<()> {
-		Ok(self.buf.flush().unwrap_or_else(|err| panic!(format!("{}", err))))
+		Ok(self.buf.flush().unwrap_or_else(|err| panic!("{}", err)))
 	}
 }
 
@@ -266,12 +266,12 @@ impl OutputHandle {
     }
     pub fn out(&self, args: FmtArguments) -> StdoutLock {
         let mut lock = self.stdout.lock();
-        lock.write_fmt(args).unwrap_or_else(|err| panic!(format!("{}", err)));
+        lock.write_fmt(args).unwrap_or_else(|err| panic!("{}", err));
         lock
     }
     pub fn err(&self, args: FmtArguments) -> StderrLock {
         let mut lock = self.stderr.lock();
-        lock.write_fmt(args).unwrap_or_else(|err| panic!(format!("{}", err)));
+        lock.write_fmt(args).unwrap_or_else(|err| panic!("{}", err));
         lock
     }
     pub fn maybe_out(&self, args: FmtArguments) -> Option<StdoutLock> {
@@ -327,14 +327,14 @@ impl Display for PrintedPanic {
 #[macro_export]
 macro_rules! breakline {
     ($lock: expr) => {
-        std::io::Write::write_fmt(&mut $lock, format_args!("\n  ")).unwrap_or_else(|err| panic!(format!("{}", err)))
+        std::io::Write::write_fmt(&mut $lock, format_args!("\n  ")).unwrap_or_else(|err| panic!("{}", err))
     }
 }
 
 #[macro_export]
 macro_rules! append {
     ($lock: expr, $($args: expr),*) => {
-        std::io::Write::write_fmt(&mut $lock, format_args!("{}", format!($($args),*))).unwrap_or_else(|err| panic!(format!("{}", err)))
+        std::io::Write::write_fmt(&mut $lock, format_args!("{}", format!($($args),*))).unwrap_or_else(|err| panic!("{}", err))
     }
 }
 
@@ -348,7 +348,7 @@ macro_rules! headed_message {
                 breakline!($lock);
             }
             $block
-            std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!(format!("{}", err)));
+            std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!("{}", err));
             $after($lock)
         } else {
             let $lock = ();
@@ -363,7 +363,7 @@ macro_rules! headed_message {
                 breakline!($lock);
             }
             $block
-            std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!(format!("{}", err)));
+            std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!("{}", err));
             $after($lock)
         } else {
             let $lock = ();
@@ -378,7 +378,7 @@ macro_rules! create_message {
         headed_message!(|lock| Some($crate::io::PrintedPanic::new(lock)),
             |msg| ::colored::Colorize::bold(::colored::Colorize::red(msg)), "Fatal error:",
             |msg| ::colored::Colorize::bold(msg), $title,
-            $pos, $lock, $block, |lock| panic!(lock))
+            $pos, $lock, $block, |lock| std::panic::panic_any(lock))
     }};
     (fatal @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
         headed_message!(|lock| $crate::io::MainOutput.maybe_err(lock),

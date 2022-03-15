@@ -572,7 +572,7 @@ impl IntegrityVerifier {
             ParsedInstructionKind::Wsr => buffer.wsr_instruction(*ins.index(), ins.default_position(), asr),
         };
         if let Err(e) = res {
-            panic!(format!("{}", e))
+            panic!("{}", e)
         }
     }
     fn invalid_num_variables(&mut self, pos: FilePosition, vars: u32) {

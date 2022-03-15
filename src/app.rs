@@ -224,7 +224,7 @@ impl PreprocessingConfig {
             match file.bytes().next() {
                 Some(Ok(0u8)) => true,
                 Some(Ok(_)) | None => false,
-                Some(Err(err)) => panic!(format!("{}", err)),
+                Some(Err(err)) => panic!("{}", err),
             }
         };
         let file = OpenOptions::new().read(true).open(&path).unwrap_or_else(|err| PreprocessingConfig::opening_input_error(&path, err, kind));
@@ -416,7 +416,7 @@ impl CheckingConfig {
             match file.bytes().next() {
                 Some(Ok(0u8)) => true,
                 Some(Ok(_)) | None => false,
-                Some(Err(err)) => panic!(format!("{}", err)),
+                Some(Err(err)) => panic!("{}", err),
             }
         };
         let file = OpenOptions::new().read(true).open(&path).unwrap_or_else(|err| CheckingConfig::opening_input_error(&path, err, kind));

@@ -6,10 +6,6 @@ use crate::{
     basic::{Variable, Literal, ClauseIndex},
 };
 
-use colored::{
-	Colorize,
-};
-
 pub struct DisplayLiteralPairCsv<'a>(pub &'a [(Literal, Literal)]);
 impl<'a> Display for DisplayLiteralPairCsv<'a> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {

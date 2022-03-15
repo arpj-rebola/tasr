@@ -64,7 +64,7 @@ impl Trimmer {
             self.process_cores_binary(wt)
         } else {
             self.process_cores_text(wt)
-        }.unwrap_or_else(|e| panic!(format!("{}", e)));
+        }.unwrap_or_else(|e| panic!("{}", e));
         self.stats.record_trim_time();
         self.stats
     }
@@ -201,7 +201,7 @@ impl<'a> TrimmedFragment<'a> {
             self.proof.write_binary(&mut self.db, wt)
         } else {
             self.proof.write_text(&mut self.db, wt)
-        }.unwrap_or_else(|e| panic!(format!("{}", e)));
+        }.unwrap_or_else(|e| panic!("{}", e));
     }
 }
 impl<'a> Drop for TrimmedFragment<'a> {

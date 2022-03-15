@@ -228,7 +228,7 @@ impl SplitterBase {
             ParsedInstructionKind::Wsr => buffer.wsr_instruction(*ins.index(), ins.default_position(), asr),
         };
         if let Err(e) = res {
-            panic!(format!("{}", e))
+            panic!("{}", e)
         }
     }
     fn init_buffer(&mut self) {
@@ -312,7 +312,7 @@ pub struct SplitFragment<'a> {
 }
 impl<'a> SplitFragment<'a> {
     pub fn dump<W: Write>(mut self, wt: &mut W) {
-        self.proof.write_text(&mut self.db, wt).unwrap_or_else(|e| panic!(format!("{}", e)));
+        self.proof.write_text(&mut self.db, wt).unwrap_or_else(|e| panic!("{}", e));
     }
 }
 impl<'a> Drop for SplitFragment<'a> {

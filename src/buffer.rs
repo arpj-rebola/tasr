@@ -1,5 +1,6 @@
 use std::{
     mem::{self},
+    fmt::{Debug, Formatter, Result as FmtResult},
 };
 
 use crate::{
@@ -10,11 +11,48 @@ use crate::{
     idflags::{ClauseIndexFlags},
 };
 
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+struct TruthStatus {
+    val: u8
+}
+impl TruthStatus {
+    pub const Unsatisfiable: TruthStatus = TruthStatus { val: 0b00u8 };
+    pub const Dependent: TruthStatus = TruthStatus { val: 0b01u8 };
+    pub const Tautology: TruthStatus = TruthStatus { val: 0b10u8 };
+    fn is_unsatisfiable(&self) -> bool {
+        self.val == 0b00u8
+    }
+    fn is_dependent(&self) -> bool {
+        self.val == 0b01u8
+    }
+    fn is_tautology(&self) -> bool {
+        self.val & 0b10u8 == 0b10u8
+    }
+    fn set_dependent(&mut self) {
+        self.val |= 0b01u8;
+    }
+    fn set_tautology(&mut self) {
+        self.val |= 0b10u8;
+    }
+}
+impl Debug for TruthStatus {
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        if self.is_unsatisfiable() {
+            write!(f, "tautology")
+        } else if self.is_dependent() {
+            write!(f, "dependent")
+        } else {
+            write!(f, "unsatisfiable")
+        }
+	}
+}
+
 pub struct ClauseBuffer {
     vec: Vec<Literal>,
     repetitions: Vec<usize>,
     conflicts: Vec<usize>,
-    truth: u8,
+    truth: TruthStatus,
 }
 impl ClauseBuffer {
     pub fn new() -> ClauseBuffer {
@@ -22,15 +60,15 @@ impl ClauseBuffer {
             vec: Vec::new(),
             repetitions: Vec::new(),
             conflicts: Vec::new(),
-            truth: 0u8,
+            truth: TruthStatus::Unsatisfiable,
         }
     }
     pub fn push(&mut self, model: &mut Model, lit: Literal) {
         if lit != Literal::Bottom {
-            self.truth |= 0b01u8;
+            self.truth.set_dependent();
         }
         if lit == Literal::Top {
-            self.truth |= 0b10u8;
+            self.truth.set_tautology();
         }
         self.vec.push(lit);
         let val = model.check_set(lit);
@@ -44,17 +82,17 @@ impl ClauseBuffer {
             self.repetitions.push(pos);
         } else {
             self.conflicts.push(pos);
-            self.truth |= 0b10u8;
+            self.truth.set_tautology();
         }
     }
     pub fn is_ok(&self) -> bool {
         self.conflicts.is_empty() && self.repetitions.is_empty()
     }
     pub fn is_absurd(&self) -> bool {
-        self.truth == 0u8
+        self.truth.is_unsatisfiable()
     }
     pub fn is_tautology(&self) -> bool {
-        self.truth > 1u8
+        self.truth.is_tautology()
     }
     pub fn extract(&self) -> (Vec<Literal>, Vec<Literal>, Vec<(Literal, Literal)>) {
         (self.vec.clone(), self.extract_repetitions(), self.extract_conflicts())
@@ -72,7 +110,7 @@ impl ClauseBuffer {
         self.vec.clear();
         self.repetitions.clear();
         self.conflicts.clear();
-        self.truth = 0u8;
+        self.truth = TruthStatus::Unsatisfiable;
     }
     fn extract_repetitions(&self) -> Vec<Literal> {
         let mut vec: Vec<Literal> = self.repetitions.iter().map(
@@ -125,6 +163,31 @@ impl ClauseBuffer {
         self.repetitions.clear();
         self.conflicts.clear();
     }
+}
+impl Debug for ClauseBuffer {
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let vec_it = self.vec.iter().enumerate();
+        let mut rep_it = self.repetitions.iter();
+        let mut conf_it = self.conflicts.iter();
+        let mut rep_index = rep_it.next();
+        let mut conf_index = conf_it.next();
+        write!(f, "[")?;
+        for (c, l) in vec_it {
+            if c != 0usize {
+                write!(f, ", ")?;
+            }
+            write!(f, "{:?}", l)?;
+            if Some(&c) == rep_index {
+                write!(f, "*")?;
+                rep_index = rep_it.next();
+            }
+            if Some(&c) == conf_index {
+                write!(f, "!")?;
+                conf_index = conf_it.next();
+            }
+        }
+        write!(f, "]({:?})", &self.truth)
+	}
 }
 
 pub struct UncheckedClauseBuffer {
@@ -213,6 +276,28 @@ impl ChainBuffer {
         unsafe { self.vec.set_len(j.offset_from(self.vec.as_ptr()) as usize); }
         self.missing.clear();
     }
+}
+impl Debug for ChainBuffer {
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let vec_it = self.vec.iter().enumerate();
+        let mut miss_it = self.missing.iter();
+        let mut miss_index = miss_it.next();
+        write!(f, "[")?;
+        for (c, l) in vec_it {
+            if c != 0usize {
+                write!(f, ", ")?;
+            }
+            write!(f, "{:?}", l)?;
+            if Some(l) == self.exclude.as_ref() {
+                write!(f, "?")?;
+            }
+            if Some(&c) == miss_index {
+                write!(f, "!")?;
+                miss_index = miss_it.next();
+            }
+        }
+        Ok(())
+	}
 }
 
 pub struct UncheckedChainBuffer {
@@ -320,6 +405,32 @@ impl WitnessBuffer {
         self.repetitions.clear();
         self.conflicts.clear();
     }
+}
+impl Debug for WitnessBuffer {
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let vec_it = self.vec.iter().enumerate();
+        let mut rep_it = self.repetitions.iter();
+        let mut conf_it = self.conflicts.iter();
+        let mut rep_index = rep_it.next();
+        let mut conf_index = conf_it.next();
+        write!(f, "[")?;
+        for (c, (v, l)) in vec_it {
+            if c != 0usize {
+                write!(f, ", ")?;
+            }
+            write!(f, "{:?} ->", v)?;
+            if Some(&c) == rep_index {
+                write!(f, "*")?;
+                rep_index = rep_it.next();
+            }
+            if Some(&c) == conf_index {
+                write!(f, "!")?;
+                conf_index = conf_it.next();
+            }
+            write!(f, " {:?}", l)?;
+        }
+        Ok(())
+	}
 }
 
 pub struct UncheckedWitnessBuffer {
@@ -475,6 +586,11 @@ impl MultichainBuffer {
         unsafe { self.vec.set_len(j.offset_from(self.vec.as_ptr()) as usize); }
         self.repetitions.clear();
     }
+}
+impl Debug for MultichainBuffer {
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "MULTICHAIN TODO")
+	}
 }
 
 pub struct UncheckedMultichainBuffer {

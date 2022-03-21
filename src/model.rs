@@ -1,5 +1,6 @@
 use std::{
     mem::{self},
+    fmt::{Debug, Formatter, Result as FmtResult},
 };
 
 use crate::{
@@ -7,7 +8,7 @@ use crate::{
 };
 
 #[repr(u8)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ModelValue {
     Unassigned = 0b000u8,
     True = 0b101u8,
@@ -70,6 +71,25 @@ impl Model {
             *val = ModelValue::Unassigned;
         }
     }
+}
+impl Debug for Model {
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let mut first: bool = true;
+        write!(f, "[")?;
+        for (n, val) in self.vec.iter().enumerate() {
+            if val != &ModelValue::Unassigned {
+                if first {
+                    first = false;
+                } else {
+                    write!(f, ", ")?;
+                }
+                let sign = if val == &ModelValue::True {0usize} else {1usize};
+                let lit = unsafe { Literal::from_index((n << 1) | sign) };
+                write!(f, "{:?}", lit)?;
+            }
+        }
+        write!(f, "]")
+	}
 }
 
 #[cfg(test)]

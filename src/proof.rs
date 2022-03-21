@@ -58,7 +58,7 @@ impl BackwardsProofInstruction {
                 wt.write_all(&[0x01, b'r'])?;
                 id.binary(wt)?;
                 wt.write_all(&[0x01, b'l'])?;
-                pos.as_binary(wt)?;
+                pos.binary(wt)?;
                 for cid in db.retrieve_chain(*chain_addr) {
                     cid.binary(wt)?;
                 }
@@ -67,7 +67,7 @@ impl BackwardsProofInstruction {
                 wt.write_all(&[0x01, b'w'])?;
                 id.binary(wt)?;
                 wt.write_all(&[0x01, b'l'])?;
-                pos.as_binary(wt)?;
+                pos.binary(wt)?;
                 let mchain = db.retrieve_multichain(*mchain_addr);
                 for (var, lit) in db.retrieve_witness(mchain.witness()) {
                     var.binary(wt)?;
@@ -90,7 +90,7 @@ impl BackwardsProofInstruction {
                 wt.write_all(&[0x01, b'd'])?;
                 id.binary(wt)?;
                 wt.write_all(&[0x01, b'l'])?;
-                pos.as_binary(wt)?;
+                pos.binary(wt)?;
                 for lit in db.retrieve_clause(*clause_addr) {
                     lit.binary(wt)?;
                 }
@@ -221,7 +221,7 @@ impl ForwardsProofInstruction {
                 wt.write_all(&[0x01, b'r'])?;
                 id.binary(wt)?;
                 wt.write_all(&[0x01, b'l'])?;
-                pos.as_binary(wt)?;
+                pos.binary(wt)?;
                 for lit in db.retrieve_clause(*clause_addr) {
                     lit.binary(wt)?;
                 }
@@ -235,7 +235,7 @@ impl ForwardsProofInstruction {
                 wt.write_all(&[0x01, b'w'])?;
                 id.binary(wt)?;
                 wt.write_all(&[0x01, b'l'])?;
-                pos.as_binary(wt)?;
+                pos.binary(wt)?;
                 for lit in db.retrieve_clause(*clause_addr) {
                     lit.binary(wt)?;
                 }
@@ -266,7 +266,7 @@ impl ForwardsProofInstruction {
                 wt.write_all(&[0x01, b'd'])?;
                 id.binary(wt)?;
                 wt.write_all(&[0x01, b'l'])?;
-                pos.as_binary(wt)
+                pos.binary(wt)
             },
         }
     }
@@ -339,7 +339,7 @@ impl ForwardsProof {
 }
 
 pub struct ProofBuffer {
-    pub vec: Vec<u8>,
+    vec: Vec<u8>,
 }
 impl ProofBuffer {
     pub fn new() -> ProofBuffer {
@@ -352,7 +352,7 @@ impl ProofBuffer {
         output.write_all(&[0x01, b'k'])?;
         id.binary(output)?;
         output.write_all(&[0x01, b'l'])?;
-        fp.as_binary(output)?;
+        fp.binary(output)?;
         let mut clause_ps = asr.parse_clause();
         while let Some(lit) = clause_ps.next() {
             lit.binary(output)?;
@@ -364,7 +364,7 @@ impl ProofBuffer {
         output.write_all(&[0x01, b'r'])?;
         id.binary(output)?;
         output.write_all(&[0x01, b'l'])?;
-        fp.as_binary(output)?;
+        fp.binary(output)?;
         {
             let mut clause_ps = asr.parse_clause();
             while let Some(lit) = clause_ps.next() {
@@ -385,7 +385,7 @@ impl ProofBuffer {
         output.write_all(&[0x01, b'w'])?;
         id.binary(output)?;
         output.write_all(&[0x01, b'l'])?;
-        fp.as_binary(output)?;
+        fp.binary(output)?;
         {
             let mut clause_ps = asr.parse_clause();
             while let Some(lit) = clause_ps.next() {
@@ -425,7 +425,7 @@ impl ProofBuffer {
         output.write_all(&[0x01, b'd'])?;
         id.binary(output)?;
         output.write_all(&[0x01, b'l'])?;
-        fp.as_binary(output)
+        fp.binary(output)
     }
     pub fn reader(&self) -> &[u8] {
         &self.vec[..]

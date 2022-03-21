@@ -17,7 +17,7 @@ use clap::{
 
 use tasr::{
     progress, fatal, panick, create_message, headed_message, append, breakline,
-    io::{PrintedPanic},
+    io::{PrintedPanic, FilePath},
     app::{PreprocessingConfig, CheckingConfig},
 };
 
@@ -36,12 +36,12 @@ impl AppConfig {
         match self {
             AppConfig::Preprocess(mut config) => {
                 progress!("checking file integrity...", lock, {
-                    append!(lock, "Checking the CNF file {} and raw ASR file {} for format errors and undefined references.", config.cnf.display(), config.asr.display());
+                    append!(lock, "Checking the CNF file {} and raw ASR file {} for format errors and undefined references.", &config.cnf, &config.asr);
                 });
                 config.integrity();
                 progress!("preprocessing ASR proof...", lock, {
                     append!(lock, "Preprocessing the raw ASR file {} into the preprocessed ASR file {} to reuse indices, trim unnecessary inferences, and reduce complex proof steps.",
-                        config.asr.display(), config.output.as_ref().map(|x| x.display()).unwrap_or_else(|| config.asr.display()));
+                        config.asr, config.output.as_ref().map(|x| x).unwrap_or_else(|| &config.asr));
                 });
                 config.preprocess();
                 config.print_integrity_stats();
@@ -51,12 +51,12 @@ impl AppConfig {
             },
             AppConfig::Check(mut config) => {
                 progress!("checking file integrity...", lock, {
-                    append!(lock, "Checking the CNF file {} and preprocessed ASR file {} for format errors and undefined references.", config.cnf.display(), config.asr.display());
+                    append!(lock, "Checking the CNF file {} and preprocessed ASR file {} for format errors and undefined references.", config.cnf, config.asr);
                 });
                 config.integrity();
                 progress!("checking ASR proof correctness...", lock, {
                     append!(lock, "Checking the CNF file {} and preprocessed ASR file {} for incorrect inferences.",
-                        config.cnf.display(), config.asr.display());
+                        config.cnf, config.asr);
                 });
                 config.integrity();
                 config.correctness();
@@ -164,26 +164,32 @@ impl Tasr {
             let formula = {
                 let mut pb = PathBuf::new();
                 pb.push(matches.value_of("FORMULA").unwrap());
-                pb
+                FilePath::new(pb)
             };
             let proof = {
                 let mut pb = PathBuf::new();
                 pb.push(matches.value_of("PROOF").unwrap());
-                pb
+                FilePath::new(pb)
             };
             let temp = match matches.value_of("TEMPDIR") {
                 Some(val) => {
                     let mut pb = PathBuf::new();
                     pb.push(val);
-                    pb
+                    FilePath::new(pb)
                 },
-                None => PathBuf::from(formula.parent().unwrap_or(&formula)),
+                None => match formula.path().parent() {
+                    Some(p) => FilePath::new(p.to_path_buf()),
+                    None => Err(ClapError::with_description(&format!(
+                        "No temporary directory was provided, so the parent to the formula path {} was tried; but the parent could not be detected.",
+                        formula
+                    ), ClapErrorKind::InvalidValue))?,
+                }
             };
             let output = match matches.value_of("OUTPUT") {
                 Some(val) => {
                     let mut pb = PathBuf::new();
                     pb.push(val);
-                    Some(pb)
+                    Some(FilePath::new(pb))
                 },
                 None => None,
             };
@@ -227,12 +233,12 @@ impl Tasr {
             let formula = {
                 let mut pb = PathBuf::new();
                 pb.push(matches.value_of("FORMULA").unwrap());
-                pb
+                FilePath::new(pb)
             };
             let proof = {
                 let mut pb = PathBuf::new();
                 pb.push(matches.value_of("PROOF").unwrap());
-                pb
+                FilePath::new(pb)
             };
             Ok(AppConfig::Check(CheckingConfig {
                 cnf: formula,

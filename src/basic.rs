@@ -49,6 +49,9 @@ impl Literal {
 	pub fn index(self) -> usize {
 		self.val as usize
 	}
+	pub unsafe fn from_index(num: usize) -> Literal {
+		Literal { val: num as u32 }
+	}
 	#[inline(always)]
 	pub fn text(&self) -> TextLiteral<'_> {
 		TextLiteral(self)

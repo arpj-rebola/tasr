@@ -73,7 +73,7 @@ impl IndexMapping {
         let mut vec = Vec::new();
         for row in &self.table {
             for item in row {
-                vec.push((item.nid, item.addr, item.pos))
+                vec.push((item.nid, item.addr, item.pos.clone()))
             }
         }
         vec

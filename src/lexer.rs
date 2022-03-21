@@ -1,14 +1,13 @@
 use std::{
     convert::{TryFrom},
     io::{Read},
-    path::{Path},
     char::{self},
     fmt::{Result as FmtResult, Debug, Display, Formatter},
     ptr::{self},
 };
 
 use crate::{
-    io::{InputReader, FilePosition},
+    io::{InputReader, FilePosition, FileOffset},
     basic::{Literal, Variable, ClauseIndex},
 };
 
@@ -53,9 +52,9 @@ impl Lexeme {
             _ => Err(self),
         }
     }
-    pub fn as_file_position(&self) -> Result<FilePosition, &Lexeme> {
+    pub fn as_file_offset(&self) -> Result<FileOffset, &Lexeme> {
         match self {
-            Lexeme::Number(num) => Ok(FilePosition::from(*num)),
+            Lexeme::Number(num) => FileOffset::try_from(*num).map_err(|_| self),
             _ => Err(self),
         }
     }
@@ -96,8 +95,7 @@ impl Display for Lexeme {
 pub trait AsrLexer {
     fn consume(&mut self);
     fn peek(&self) -> &Lexeme;
-    fn position(&self) -> FilePosition;
-    fn path(&self) -> &Path;
+    fn position(&self) -> &FilePosition;
 }
 
 pub struct UnbufferedAsrTextLexer<R: Read> {
@@ -107,7 +105,7 @@ pub struct UnbufferedAsrTextLexer<R: Read> {
 }
 impl<R: Read> UnbufferedAsrTextLexer<R> {
     pub fn new(input: InputReader<R>) -> UnbufferedAsrTextLexer<R> {
-        let pos = input.position();
+        let pos = input.position().clone();
         let mut lexer = UnbufferedAsrTextLexer::<R> {
             input: input,
             position: pos,
@@ -127,7 +125,7 @@ impl<R: Read> UnbufferedAsrTextLexer<R> {
                 }
             },
             x => {
-                self.position = self.input.position();
+                self.position.set_offset(self.input.position().offset());
                 break x;
             }
         } }
@@ -241,14 +239,14 @@ impl<R: Read> UnbufferedAsrTextLexer<R> {
     #[cold]
     #[inline(never)]
     fn invalid_input(&self, c: u8) -> ! {
-        panick!("invalid input" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid input" @ self.position, lock, {
             append!(lock, "Could not recognize character '{}'.", c as char);
         })
     }
     #[cold]
     #[inline(never)]
     fn invalid_escape(&self, s: Option<u8>) -> ! {
-        panick!("invalid escape" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid escape" @ self.position, lock, {
             match s {
                 Some(c) => append!(lock, "Invalid escaped character '\\{}'.", c as char),
                 None => append!(lock, "Unfinished escaped character."),
@@ -258,7 +256,7 @@ impl<R: Read> UnbufferedAsrTextLexer<R> {
     #[cold]
     #[inline(never)]
     fn invalid_unicode_escape(&self, s: Option<u32>) -> ! {
-        panick!("invalid unicode escape" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid unicode escape" @ self.position, lock, {
             match s {
                 Some(c) => append!(lock, "Invalid escaped Unicode character with code {:#X}.", c),
                 None => append!(lock, "Unfinished escaped Unicode character."),
@@ -268,42 +266,42 @@ impl<R: Read> UnbufferedAsrTextLexer<R> {
     #[cold]
     #[inline(never)]
     fn not_a_number(&self) -> ! {
-        panick!("invalid integer" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid integer" @ self.position, lock, {
             append!(lock, "Could not parse an integer.");
         })
     }
     #[cold]
     #[inline(never)]
     fn not_a_letter(&self) -> ! {
-        panick!("invalid letter" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid letter" @ self.position, lock, {
             append!(lock, "Could not parse a letter.");
         })
     }
     #[cold]
     #[inline(never)]
     fn not_a_header(&self) -> ! {
-        panick!("invalid header" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid header" @ self.position, lock, {
             append!(lock, "Could not parse a 'p' header.");
         })
     }
     #[cold]
     #[inline(never)]
     fn not_a_quote(&self) -> ! {
-        panick!("invalid quoted string" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid quoted string" @ self.position, lock, {
             append!(lock, "Unclosed quoted string.");
         })
     }
     #[cold]
     #[inline(never)]
     fn out_of_range_integer(&self) -> ! {
-        panick!("out-of-range integer" @ self.position.with_path(self.input.path()), lock, {
+        panick!("out-of-range integer" @ self.position, lock, {
             append!(lock, "Parsed a number outside of the 64-bit signed range [{}..{}].", i64::min_value(), i64::max_value());
         })
     }
     #[cold]
     #[inline(never)]
     fn out_of_range_header(&self) -> ! {
-        panick!("out-of-range header" @ self.position.with_path(self.input.path()), lock, {
+        panick!("out-of-range header" @ self.position, lock, {
             append!(lock, "Parsed a header longer than 8 characters.");
         })
     }
@@ -324,50 +322,52 @@ impl<R: Read> AsrLexer for UnbufferedAsrTextLexer<R> {
         }
     }
     #[inline]
-    fn position(&self) -> FilePosition {
-        self.position.clone()
-    }
-    #[inline]
-    fn path(&self) -> &Path {
-        self.input.path()
+    fn position(&self) -> &FilePosition {
+        &self.position
     }
 }
 
 pub struct BufferedAsrTextLexer<R: Read> {
     input: InputReader<R>,
-    vec: Vec<(Lexeme, FilePosition)>,
-    current: *const (Lexeme, FilePosition),
-    end: *const (Lexeme, FilePosition),
+    vec: Vec<(Lexeme, FileOffset)>,
+    current: *const (Lexeme, FileOffset),
+    end: *const (Lexeme, FileOffset),
     position: FilePosition,
+    saved: FileOffset,
 }
 impl<R: Read> BufferedAsrTextLexer<R> {
     const Length: usize = (1usize << 20);
     pub fn new(input: InputReader<R>) -> BufferedAsrTextLexer<R> {
-        let pos = input.position();
+        let pos = input.position().clone();
+        let saved = pos.offset();
         let mut lexer = BufferedAsrTextLexer::<R> {
             input: input,
-            vec: Vec::<(Lexeme, FilePosition)>::with_capacity(BufferedAsrTextLexer::<R>::Length),
+            vec: Vec::<(Lexeme, FileOffset)>::with_capacity(BufferedAsrTextLexer::<R>::Length),
             current: ptr::null_mut(),
             end: ptr::null_mut(),
             position: pos,
+            saved: saved,
         };
         lexer.buffer();
         lexer
     }
     fn buffer(&mut self) {
         self.vec.clear();
+        self.position.set_offset(self.saved);
         while self.vec.len() < BufferedAsrTextLexer::<R>::Length {
             let lx = self.parse();
             if let Lexeme::Eof = lx {
                 break;
             }
-            self.vec.push((lx, self.position));
+            self.vec.push((lx, self.position.offset()));
         }
         while self.vec.len() < BufferedAsrTextLexer::<R>::Length {
-            self.vec.push((Lexeme::Eof, self.position));
+            self.vec.push((Lexeme::Eof, self.position.offset()));
         }
         self.current = self.vec.as_ptr();
         self.end = unsafe { self.current.add(self.vec.len()) };
+        self.saved = self.position.offset();
+        self.position.set_offset(self.vec.first().unwrap().1);
     }
     fn ignore(&mut self) -> Option<u8> {
         loop { match self.input.next() {
@@ -380,7 +380,7 @@ impl<R: Read> BufferedAsrTextLexer<R> {
                 }
             },
             x => {
-                self.position = self.input.position();
+                self.position.set_offset(self.input.position().offset());
                 break x;
             },
         } }
@@ -504,14 +504,14 @@ impl<R: Read> BufferedAsrTextLexer<R> {
     #[cold]
     #[inline(never)]
     fn invalid_input(&self, c: u8) -> ! {
-        panick!("invalid input" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid input" @ self.position, lock, {
             append!(lock, "Could not recognize character '{}'.", c as char);
         })
     }
     #[cold]
     #[inline(never)]
     fn invalid_escape(&self, s: Option<u8>) -> ! {
-        panick!("invalid escape" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid escape" @ self.position, lock, {
             match s {
                 Some(c) => append!(lock, "Invalid escaped character '\\{}'.", c as char),
                 None => append!(lock, "Unfinished escaped character."),
@@ -521,7 +521,7 @@ impl<R: Read> BufferedAsrTextLexer<R> {
     #[cold]
     #[inline(never)]
     fn invalid_unicode_escape(&self, s: Option<u32>) -> ! {
-        panick!("invalid unicode escape" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid unicode escape" @ self.position, lock, {
             match s {
                 Some(c) => append!(lock, "Invalid escaped Unicode character with code {:#X}.", c),
                 None => append!(lock, "Unfinished escaped Unicode character."),
@@ -531,42 +531,42 @@ impl<R: Read> BufferedAsrTextLexer<R> {
     #[cold]
     #[inline(never)]
     fn not_a_number(&self) -> ! {
-        panick!("invalid integer" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid integer" @ self.position, lock, {
             append!(lock, "Could not parse an integer.");
         })
     }
     #[cold]
     #[inline(never)]
     fn not_a_letter(&self) -> ! {
-        panick!("invalid letter" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid letter" @ self.position, lock, {
             append!(lock, "Could not parse a letter.");
         })
     }
     #[cold]
     #[inline(never)]
     fn not_a_header(&self) -> ! {
-        panick!("invalid header" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid header" @ self.position, lock, {
             append!(lock, "Could not parse a 'p' header.");
         })
     }
     #[cold]
     #[inline(never)]
     fn not_a_quote(&self) -> ! {
-        panick!("invalid quoted string" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid quoted string" @ self.position, lock, {
             append!(lock, "Unclosed quoted string.");
         })
     }
     #[cold]
     #[inline(never)]
     fn out_of_range_integer(&self) -> ! {
-        panick!("out-of-range integer" @ self.position.with_path(self.input.path()), lock, {
+        panick!("out-of-range integer" @ self.position, lock, {
             append!(lock, "Parsed a number outside of the 64-bit signed range [{}..{}].", i64::min_value(), i64::max_value());
         })
     }
     #[cold]
     #[inline(never)]
     fn out_of_range_header(&self) -> ! {
-        panick!("out-of-range header" @ self.position.with_path(self.input.path()), lock, {
+        panick!("out-of-range header" @ self.position, lock, {
             append!(lock, "Parsed a header longer than 8 characters.");
         })
     }
@@ -581,15 +581,14 @@ impl<R: Read> AsrLexer for BufferedAsrTextLexer<R> {
         self.current = unsafe { self.current.add(1usize) };
         if self.current == self.end {
             self.buffer();
+        } else {
+            let off = unsafe { (*self.current).1 };
+            self.position.set_offset(off)
         }
     }
     #[inline]
-    fn position(&self) -> FilePosition {
-        unsafe { (*self.current).1.clone() }
-    }
-    #[inline]
-    fn path(&self) -> &Path {
-        self.input.path()
+    fn position(&self) -> &FilePosition {
+        &self.position
     }
 }
 
@@ -601,7 +600,7 @@ pub struct UnbufferedAsrBinaryLexer<R: Read> {
 impl<R: Read> UnbufferedAsrBinaryLexer<R> {
     pub fn new(mut input: InputReader<R>) -> UnbufferedAsrBinaryLexer<R> {
         input.next();
-        let pos = input.position();
+        let pos = input.position().clone();
         let mut lexer = UnbufferedAsrBinaryLexer::<R> {
             input: input,
             position: pos,
@@ -611,6 +610,7 @@ impl<R: Read> UnbufferedAsrBinaryLexer<R> {
         lexer
     }
     fn read_number(&mut self, c: u8) {
+        self.position.set_offset(self.input.position().offset());
         let mut unum: u64 = ((c & 0b0111_1111u8) >> 1) as u64;
         let inum: i64 = if c & 0b0000_0001u8 == 0u8 {
             1i64
@@ -633,6 +633,7 @@ impl<R: Read> UnbufferedAsrBinaryLexer<R> {
         self.cache = Lexeme::Number(inum * (unum as i64));
     }
     fn read_other(&mut self) {
+        self.position.set_offset(self.input.position().offset());
         match self.input.next() {
             Some(b'p') => self.read_header(),
             Some(c) if (c as char).is_ascii_alphabetic() => self.cache = Lexeme::Letter(c),
@@ -710,7 +711,7 @@ impl<R: Read> UnbufferedAsrBinaryLexer<R> {
     #[cold]
     #[inline(never)]
     fn invalid_escape(&self, s: Option<u8>) -> ! {
-        panick!("invalid escape" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid escape" @ self.position, lock, {
             match s {
                 Some(c) => append!(lock, "Invalid escaped character '\\{}'.", c as char),
                 None => append!(lock, "Unfinished escaped character."),
@@ -720,7 +721,7 @@ impl<R: Read> UnbufferedAsrBinaryLexer<R> {
     #[cold]
     #[inline(never)]
     fn invalid_unicode_escape(&self, s: Option<u32>) -> ! {
-        panick!("invalid unicode escape" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid unicode escape" @ self.position, lock, {
             match s {
                 Some(c) => append!(lock, "Invalid escaped Unicode character with code {:#X}.", c),
                 None => append!(lock, "Unfinished escaped Unicode character."),
@@ -730,35 +731,35 @@ impl<R: Read> UnbufferedAsrBinaryLexer<R> {
     #[cold]
     #[inline(never)]
     fn not_a_number(&self) -> ! {
-        panick!("invalid integer" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid integer" @ self.position, lock, {
             append!(lock, "Could not parse an integer.");
         })
     }
     #[cold]
     #[inline(never)]
     fn not_a_letter(&self) -> ! {
-        panick!("invalid letter" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid letter" @ self.position, lock, {
             append!(lock, "Could not parse a letter.");
         })
     }
     #[cold]
     #[inline(never)]
     fn not_a_header(&self) -> ! {
-        panick!("invalid header" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid header" @ self.position, lock, {
             append!(lock, "Could not parse a header.");
         })
     }
     #[cold]
     #[inline(never)]
     fn not_a_quote(&self) -> ! {
-        panick!("invalid quoted string" @ self.position.with_path(self.input.path()), lock, {
+        panick!("invalid quoted string" @ self.position, lock, {
             append!(lock, "Unclosed quoted string.");
         })
     }
     #[cold]
     #[inline(never)]
     fn out_of_range_integer(&self) -> ! {
-        panick!("out-of-range integer" @ self.position.with_path(self.input.path()), lock, {
+        panick!("out-of-range integer" @ self.position, lock, {
             append!(lock, "Parsed a number outside of the 64-bit signed range [{}..{}].",
                 -(((1u64 << 63) - 1u64) as i64), ((1u64 << 63) - 1u64) as i64);
         })
@@ -766,7 +767,7 @@ impl<R: Read> UnbufferedAsrBinaryLexer<R> {
     #[cold]
     #[inline(never)]
     fn out_of_range_header(&self) -> ! {
-        panick!("out-of-range header" @ self.position.with_path(self.input.path()), lock, {
+        panick!("out-of-range header" @ self.position, lock, {
             append!(lock, "Parsed a header longer than 8 characters.");
         })
     }
@@ -784,11 +785,7 @@ impl<R: Read> AsrLexer for UnbufferedAsrBinaryLexer<R> {
         }
     }
     #[inline]
-    fn position(&self) -> FilePosition {
-        self.position.clone()
-    }
-    #[inline]
-    fn path(&self) -> &Path {
-        self.input.path()
+    fn position(&self) -> &FilePosition {
+        &self.position
     }
 }

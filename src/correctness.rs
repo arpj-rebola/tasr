@@ -1,11 +1,10 @@
 use std::{
-    path::{PathBuf},
     mem::{self},
     time::{Instant, Duration},
 };
 
 use crate::{
-    io::{DeferredPosition},
+    io::{DeferredFilePosition},
     clauseset::{ClauseSet},
     basic::{InstructionNumber, ClauseIndex, Literal, Variable},
     lexer::{AsrLexer},
@@ -20,9 +19,9 @@ use crate::{
 };
 
 pub enum CorrectnessError {
-    IncorrectCore(DeferredPosition, ClauseIndex, InstructionNumber, Vec<Literal>),
-    IncorrectRupChain(DeferredPosition, ClauseIndex, InstructionNumber, Vec<Literal>, PropagationError),
-    IncorrectWsrChain(DeferredPosition, ClauseIndex, InstructionNumber, Vec<Literal>, Vec<(Variable, Literal)>, ClauseIndex, Vec<Literal>, PropagationError),
+    IncorrectCore(DeferredFilePosition, ClauseIndex, InstructionNumber, Vec<Literal>),
+    IncorrectRupChain(DeferredFilePosition, ClauseIndex, InstructionNumber, Vec<Literal>, PropagationError),
+    IncorrectWsrChain(DeferredFilePosition, ClauseIndex, InstructionNumber, Vec<Literal>, Vec<(Variable, Literal)>, ClauseIndex, Vec<Literal>, PropagationError),
 }
 impl CorrectnessError {
     pub fn show(&self) {
@@ -197,8 +196,6 @@ pub struct CorrectnessChecker {
     begin: u64,
     end: u64,
     current: InstructionNumber,
-    original: PathBuf,
-    deferred: PathBuf,
 }
 impl CorrectnessChecker {
     pub fn new(config: CorrectnessConfig) -> CorrectnessChecker {
@@ -217,17 +214,15 @@ impl CorrectnessChecker {
             begin: 0u64,
             end: 0u64,
             current: InstructionNumber::new_premise(),
-            original: PathBuf::from("(unknown)"),
-            deferred: PathBuf::from("(unknown)"),
         }
     }
     pub fn check<L: AsrLexer, M: AsrLexer>(mut self, mut cnf: AsrParser<L>, mut asr: AsrParser<M>) -> CorrectnessStats {
-        self.original = asr.path().to_path_buf();
-        self.deferred = if let Some((_, src)) = asr.parse_source_header() {
-            PathBuf::from(src)
-        } else {
-            PathBuf::from("(unknown)")
-        };
+        // self.original = asr.path().to_path_buf();
+        // self.deferred = if let Some((_, src)) = asr.parse_source_header() {
+        //     PathBuf::from(src)
+        // } else {
+        //     PathBuf::from("(unknown)")
+        // };
         let (_, total) = asr.parse_count_header(true).unwrap();
         self.begin = self.config.lower(total);
         self.end = self.config.upper(total);
@@ -444,7 +439,7 @@ impl CorrectnessChecker {
     }
     fn incorrect_core(&mut self, ins: &ParsedInstruction) {
         let clause = self.clause.extract();
-        let pos = ins.position(&self.original, &self.deferred);
+        let pos = ins.position().clone();
         self.stats.log_error(CorrectnessError::IncorrectCore(pos, *ins.index(), self.current, clause));
     }
     fn incorrect_rup(&mut self, ins: &ParsedInstruction, central: ClauseAddress) {
@@ -452,7 +447,7 @@ impl CorrectnessChecker {
         let mut checker = self.prop.explicit_rup_check(clause);
         checker.check_chain(Some(self.chain.chain()), &self.db, &self.formula);
         let pe = checker.extract_propagations();
-        let pos = ins.position(&self.original, &self.deferred);
+        let pos = ins.position().clone();
         self.stats.log_error(CorrectnessError::IncorrectRupChain(pos, *ins.index(), self.current, clause.into_iter().copied().collect(), pe));
     }
     fn incorrect_wsr(&mut self, ins: &ParsedInstruction, central: ClauseAddress) {
@@ -464,7 +459,7 @@ impl CorrectnessChecker {
             let mut checker = self.prop.explicit_wsr_check(clause, lateral, &self.subst);
             checker.check_chain(self.chain.spec(lid).unwrap(), &self.db, &self.formula);
             let pe = checker.extract_propagations();
-            let pos = ins.position(&self.original, &self.deferred);
+            let pos = ins.position().clone();
             let clausevec = clause.into_iter().copied().collect();
             let lateralvec = lateral.into_iter().copied().collect();
             self.stats.log_error(CorrectnessError::IncorrectWsrChain(pos, *ins.index(), self.current, clausevec, witness, lid, lateralvec, pe));

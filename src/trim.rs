@@ -64,7 +64,7 @@ impl Trimmer {
             self.process_cores_binary(wt)
         } else {
             self.process_cores_text(wt)
-        }.unwrap_or_else(|e| panic!(format!("{}", e)));
+        }.unwrap_or_else(|e| panic!("{}", e));
         self.stats.record_trim_time();
         self.stats
     }
@@ -73,7 +73,7 @@ impl Trimmer {
         let ((pos, clause_addr), flags) = self.idflags.take(id).unwrap();
         if flags.has_check_schedule() {
             let chain_addr = self.process_chain(asr.parse_chain());
-            self.process_explicit_deletions(pos);
+            self.process_explicit_deletions(&pos);
             self.proof.insert_rup(id, pos, clause_addr, chain_addr);
             self.stats.new_inference();
         } else {
@@ -109,7 +109,7 @@ impl Trimmer {
     fn process_del_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let id = ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
-        let pos = ins.default_position();
+        let pos = ins.position().origin().clone();
         self.idflags.insert(*id, (pos, clause_addr)).unwrap();
     }
     fn process_clause<L: AsrLexer>(&mut self, mut ps: AsrClauseParser<'_, L>) -> ClauseAddress {
@@ -139,12 +139,12 @@ impl Trimmer {
         self.witness.clear();
         addr
     }
-    fn process_explicit_deletions(&mut self, pos: FilePosition) {
+    fn process_explicit_deletions(&mut self, pos: &FilePosition) {
         self.dels.sort();
         self.dels.dedup();
         for &did in &self.dels {
             self.idflags.flags_mut(did).unwrap().set_check_schedule();
-            self.proof.insert_del(did, pos);
+            self.proof.insert_del(did, pos.clone());
             self.stats.new_deletion_instruction();
         }
         self.dels.clear();
@@ -178,7 +178,7 @@ impl Trimmer {
                 wt.write_all(&[0x01, b'k'])?;
                 id.binary(wt)?;
                 wt.write_all(&[0x01, b'l'])?;
-                pos.as_binary(wt)?;
+                pos.binary(wt)?;
                 for &lit in self.db.retrieve_clause(*clause_addr) {
                     lit.binary(wt)?;
                 }
@@ -201,7 +201,7 @@ impl<'a> TrimmedFragment<'a> {
             self.proof.write_binary(&mut self.db, wt)
         } else {
             self.proof.write_text(&mut self.db, wt)
-        }.unwrap_or_else(|e| panic!(format!("{}", e)));
+        }.unwrap_or_else(|e| panic!("{}", e));
     }
 }
 impl<'a> Drop for TrimmedFragment<'a> {

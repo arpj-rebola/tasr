@@ -1,5 +1,4 @@
 use std::{
-    path::{PathBuf, Path},
     io::{Error as IoError, Write, Read},
     fs::{OpenOptions},
     time::{Duration},
@@ -13,7 +12,7 @@ use crate::{
     tempfile::{TempFiles},
     lexer::{UnbufferedAsrBinaryLexer, UnbufferedAsrTextLexer},
     parser::{AsrParser},
-    io::{OutputWriter, InputReader},
+    io::{OutputWriter, InputReader, FilePath},
     proof::{ProofBuffer},
 };
 
@@ -23,10 +22,10 @@ enum TbParser<R: Read> {
 }
 
 pub struct PreprocessingConfig {
-    pub cnf: PathBuf,
-    pub asr: PathBuf,
-    pub temp: PathBuf,
-    pub output: Option<PathBuf>,
+    pub cnf: FilePath,
+    pub asr: FilePath,
+    pub temp: FilePath,
+    pub output: Option<FilePath>,
     pub chunk: u64,
     pub stats: bool,
     pub integrity: Option<IntegrityStats>,
@@ -60,8 +59,8 @@ impl PreprocessingConfig {
                     TbParser::TextParser(asr_ps) => {
                         let mut splitter = Splitter::new(config, asr_ps, &mut buffer);
                         while let Some(fragment) = splitter.next() {
-                            let (split_path, split_file) = split_files.get();
-                            let mut split_out = OutputWriter::with_capacity(split_file, split_path, (1usize << 16) - 1usize);
+                            let split_file = split_files.get();
+                            let mut split_out = OutputWriter::with_capacity(split_file, (1usize << 16) - 1usize);
                             fragment.dump(&mut split_out);
                             split_out.flush().unwrap();
                         }
@@ -70,8 +69,8 @@ impl PreprocessingConfig {
                     TbParser::BinaryParser(asr_ps) => {
                         let mut splitter = Splitter::new(config, asr_ps, &mut buffer);
                         while let Some(fragment) = splitter.next() {
-                            let (split_path, split_file) = split_files.get();
-                            let mut split_out = OutputWriter::with_capacity(split_file, split_path, (1usize << 16) - 1usize);
+                            let split_file = split_files.get();
+                            let mut split_out = OutputWriter::with_capacity(split_file, (1usize << 16) - 1usize);
                             fragment.dump(&mut split_out);
                             split_out.flush().unwrap();
                         }
@@ -82,7 +81,7 @@ impl PreprocessingConfig {
             let stats = {
                 let mut trim_files = temp_files.trimmed();
                 let mut trimmer = Trimmer::new(data);
-                while let Some((split_path, trim_path, trim_file)) = trim_files.get() {
+                while let Some((split_path, trim_file)) = trim_files.get() {
                     let parser = PreprocessingConfig::open_input(split_path, "transitional split ASR proof");
                     let fragment = match parser {
                         TbParser::TextParser(asr_ps) => {
@@ -92,12 +91,12 @@ impl PreprocessingConfig {
                             trimmer.process(asr_ps)
                         },
                     };
-                    let mut trim_out = OutputWriter::with_capacity(trim_file, trim_path, (1usize << 16) - 1usize);
+                    let mut trim_out = OutputWriter::with_capacity(trim_file, (1usize << 16) - 1usize);
                     fragment.dump(&mut trim_out, binary);
                     trim_out.flush().unwrap();
                 }
-                let (core_path, core_file) = trim_files.core();
-                let mut core_out = OutputWriter::with_capacity(core_file, core_path, (1usize << 16) - 1usize);
+                let core_file = trim_files.core();
+                let mut core_out = OutputWriter::with_capacity(core_file, (1usize << 16) - 1usize);
                 let stats = trimmer.core(&mut core_out, binary);
                 core_out.flush().unwrap();
                 stats
@@ -106,9 +105,9 @@ impl PreprocessingConfig {
                 Some(path) => path,
                 None => &self.asr,
             };
-            let output_file = OpenOptions::new().create(true).write(true).truncate(true).open(&output_path)
+            let output_file = OpenOptions::new().create(true).write(true).truncate(true).open(output_path.path())
                 .unwrap_or_else(|err| PreprocessingConfig::opening_output_error(&output_path, err, "preprocessed ASR proof"));
-            let mut output = OutputWriter::with_capacity(output_file, output_path, (1usize << 16) - 1usize);
+            let mut output = OutputWriter::with_capacity(output_file, (1usize << 16) - 1usize);
             if binary {
                 temp_files.conflate_binary(&self.asr, stats.instruction_count(), &mut output);
             } else {
@@ -180,12 +179,12 @@ impl PreprocessingConfig {
         if self.integrity.as_ref().map(|intg| intg.errors.is_empty()).unwrap_or(false) {
             success!("Proof preprocessing succeeded", lock, {
                 append!(lock, "Raw ASR refutation {} of CNF formula {} was successfully preprocessed into ASR refutation {} in {}ms.",
-                    &self.asr.display(), &self.cnf.display(), &self.asr.display(), self.total_time().as_millis());
+                    &self.asr, &self.cnf, self.output.as_ref().unwrap_or(&self.asr), self.total_time().as_millis());
             });
         } else {
             error!("Proof preprocessing failed", lock, {
                 append!(lock, "Failed to preprocess raw ASR refutation {} of CNF formula {} due to {} errors within {}ms.",
-                    &self.asr.display(), &self.cnf.display(), self.total_errors(), self.total_time().as_millis());
+                    &self.asr, &self.cnf, self.total_errors(), self.total_time().as_millis());
             });
         }
     }
@@ -218,33 +217,33 @@ impl PreprocessingConfig {
             end: self.data.take().unwrap().end,
         }
     }
-    fn open_input<'a>(path: &'a Path, kind: &str) -> TbParser<impl Read> {
+    fn open_input(path: &FilePath, kind: &str) -> TbParser<impl Read> {
         let binary = {
-            let file = OpenOptions::new().read(true).open(&path).unwrap_or_else(|err| PreprocessingConfig::opening_input_error(&path, err, kind));
+            let file = OpenOptions::new().read(true).open(path.path()).unwrap_or_else(|err| PreprocessingConfig::opening_input_error(path, err, kind));
             match file.bytes().next() {
                 Some(Ok(0u8)) => true,
                 Some(Ok(_)) | None => false,
-                Some(Err(err)) => panic!(format!("{}", err)),
+                Some(Err(err)) => panic!("{}", err),
             }
         };
-        let file = OpenOptions::new().read(true).open(&path).unwrap_or_else(|err| PreprocessingConfig::opening_input_error(&path, err, kind));
-        let input = InputReader::new(file, path, binary);
+        let file = OpenOptions::new().read(true).open(path.path()).unwrap_or_else(|err| PreprocessingConfig::opening_input_error(path, err, kind));
+        let input = InputReader::new(file, path.clone(), binary);
         if binary {
             TbParser::BinaryParser(AsrParser::new(UnbufferedAsrBinaryLexer::new(input)))
         } else {
             TbParser::TextParser(AsrParser::new(UnbufferedAsrTextLexer::new(input)))
         }
     }
-    fn opening_input_error(path: &Path, err: IoError, kind: &str) -> ! {
+    fn opening_input_error(path: &FilePath, err: IoError, kind: &str) -> ! {
         panick!("unable to open input file", lock, {
-            append!(lock, "Could not open input {} file {}:", kind, path.to_str().unwrap());
+            append!(lock, "Could not open input {} file {}:", kind, path.path().to_str().unwrap());
             breakline!(lock);
             append!(lock, "{}", err);
         })
     }
-    fn opening_output_error(path: &Path, err: IoError, kind: &str) -> ! {
+    fn opening_output_error(path: &FilePath, err: IoError, kind: &str) -> ! {
         panick!("unable to open output file", lock, {
-            append!(lock, "Could not open output {} file {}:", kind, path.to_str().unwrap());
+            append!(lock, "Could not open output {} file {}:", kind, path.path().to_str().unwrap());
             breakline!(lock);
             append!(lock, "{}", err);
         })
@@ -252,8 +251,8 @@ impl PreprocessingConfig {
 }
 
 pub struct CheckingConfig {
-    pub cnf: PathBuf,
-    pub asr: PathBuf,
+    pub cnf: FilePath,
+    pub asr: FilePath,
     pub permissive: bool,
     pub select: u64,
     pub parts: u64,
@@ -357,7 +356,7 @@ impl CheckingConfig {
                     append!(lock, "Preprocessed");
                 }
                 append!(lock, " ASR refutation {} of CNF formula {} was successfully checked correct in {}ms",
-                    &self.asr.display(), &self.cnf.display(), self.total_time().as_millis());
+                    &self.asr, &self.cnf, self.total_time().as_millis());
                 let warnings = self.total_warnings();
                 if warnings > 0usize {
                     append!(lock, " with {} warnings", warnings);
@@ -367,7 +366,7 @@ impl CheckingConfig {
         } else {
             error!("Proof checking failed", lock, {
                 append!(lock, "Preprocessed ASR refutation {} of CNF formula {} was found incorrect due to {} errors",
-                    &self.asr.display(), &self.cnf.display(), self.total_errors());
+                    &self.asr, &self.cnf, self.total_errors());
                 let warnings = self.total_warnings();
                 if warnings > 0usize {
                     append!(lock, " and {} warnings", warnings);
@@ -410,26 +409,26 @@ impl CheckingConfig {
             permissive: self.permissive,
         }
     }
-    fn open_input<'a>(path: &'a Path, kind: &str) -> TbParser<impl Read> {
+    fn open_input(path: &FilePath, kind: &str) -> TbParser<impl Read> {
         let binary = {
-            let file = OpenOptions::new().read(true).open(&path).unwrap_or_else(|err| PreprocessingConfig::opening_input_error(&path, err, kind));
+            let file = OpenOptions::new().read(true).open(path.path()).unwrap_or_else(|err| PreprocessingConfig::opening_input_error(path, err, kind));
             match file.bytes().next() {
                 Some(Ok(0u8)) => true,
                 Some(Ok(_)) | None => false,
-                Some(Err(err)) => panic!(format!("{}", err)),
+                Some(Err(err)) => panic!("{}", err),
             }
         };
-        let file = OpenOptions::new().read(true).open(&path).unwrap_or_else(|err| CheckingConfig::opening_input_error(&path, err, kind));
-        let input = InputReader::new(file, path, binary);
+        let file = OpenOptions::new().read(true).open(path.path()).unwrap_or_else(|err| CheckingConfig::opening_input_error(path, err, kind));
+        let input = InputReader::new(file, path.clone(), binary);
         if binary {
             TbParser::BinaryParser(AsrParser::new(UnbufferedAsrBinaryLexer::new(input)))
         } else {
             TbParser::TextParser(AsrParser::new(UnbufferedAsrTextLexer::new(input)))
         }
     }
-    fn opening_input_error(path: &Path, err: IoError, kind: &str) -> ! {
+    fn opening_input_error(path: &FilePath, err: IoError, kind: &str) -> ! {
         panick!("unable to open input file", lock, {
-            append!(lock, "Could not open input {} file {}:", kind, path.to_str().unwrap());
+            append!(lock, "Could not open input {} file {}:", kind, path.path().to_str().unwrap());
             breakline!(lock);
             append!(lock, "{}", err);
         })

@@ -1,7 +1,6 @@
 use std::{
     mem::{self},
     time::{Instant, Duration},
-    path::{PathBuf},
 };
 
 use either::{
@@ -9,7 +8,7 @@ use either::{
 };
 
 use crate::{
-    io::{FilePosition, PathFilePosition, DeferredPosition, InputReader},
+    io::{FilePosition, DeferredFilePosition, InputReader},
     basic::{Literal, Variable, ClauseIndex, InstructionNumber},
     model::{Model},
     substitution::{Substitution},
@@ -55,16 +54,16 @@ impl ClauseIndexCounter {
 }
 
 pub enum IntegrityError {
-    InvalidNumberOfVariables(PathFilePosition, u32, u32),
-    InvalidNumberOfClauses(PathFilePosition, u64, u64),
-    InvalidNumberOfInstructions(PathFilePosition, u64, u64),
-    InvalidClause(DeferredPosition, Option<ClauseIndex>, InstructionNumber, Vec<Literal>, Vec<Literal>, Vec<(Literal, Literal)>),
-    InvalidWitness(DeferredPosition, ClauseIndex, InstructionNumber, Vec<(Variable, Literal)>, Vec<(Variable, Literal)>, Vec<(Variable, Vec<Literal>)>),
-    ConflictingId(DeferredPosition, ClauseIndex, InstructionNumber),
-    ChainMissingId(DeferredPosition, ClauseIndex, InstructionNumber, Option<ClauseIndex>, Vec<ClauseIndex>, Vec<ClauseIndex>),
-    InvalidLateralId(DeferredPosition, ClauseIndex, InstructionNumber, Vec<ClauseIndex>, Vec<ClauseIndex>, Vec<ClauseIndex>, Vec<ClauseIndex>),
-    MissingDeletionId(DeferredPosition, ClauseIndex, InstructionNumber),
-    MissingQed(PathFilePosition),
+    InvalidNumberOfVariables(FilePosition, u32, u32),
+    InvalidNumberOfClauses(FilePosition, u64, u64),
+    InvalidNumberOfInstructions(FilePosition, u64, u64),
+    InvalidClause(DeferredFilePosition, Option<ClauseIndex>, InstructionNumber, Vec<Literal>, Vec<Literal>, Vec<(Literal, Literal)>),
+    InvalidWitness(DeferredFilePosition, ClauseIndex, InstructionNumber, Vec<(Variable, Literal)>, Vec<(Variable, Literal)>, Vec<(Variable, Vec<Literal>)>),
+    ConflictingId(DeferredFilePosition, ClauseIndex, InstructionNumber),
+    ChainMissingId(DeferredFilePosition, ClauseIndex, InstructionNumber, Option<ClauseIndex>, Vec<ClauseIndex>, Vec<ClauseIndex>),
+    InvalidLateralId(DeferredFilePosition, ClauseIndex, InstructionNumber, Vec<ClauseIndex>, Vec<ClauseIndex>, Vec<ClauseIndex>, Vec<ClauseIndex>),
+    MissingDeletionId(DeferredFilePosition, ClauseIndex, InstructionNumber),
+    MissingQed(FilePosition),
 }
 impl IntegrityError {
     pub fn show(&self) {
@@ -298,6 +297,7 @@ impl IntegrityStats {
     }
 }
 
+#[derive(Debug)]
 pub struct IntegrityConfig {
     pub preprocessing: bool,
     pub select: u64,
@@ -329,14 +329,15 @@ pub struct IntegrityVerifier {
     insertions: Option<Vec<u64>>,
     stats: IntegrityStats,
     config: IntegrityConfig,
-    current: InstructionNumber,
     countdown: u64,
-    original: PathBuf,
-    deferred: PathBuf,
+    counthd: Option<(FilePosition, u64)>,
+    current: InstructionNumber,
+    // original: PathBuf,
+    // deferred: PathBuf,
 }
 impl IntegrityVerifier {
     pub fn new(config: IntegrityConfig) -> IntegrityVerifier {
-        IntegrityVerifier {
+        let verifier = IntegrityVerifier {
             clause: ClauseBuffer::new(),
             chain: ChainBuffer::new(),
             witness: WitnessBuffer::new(),
@@ -348,56 +349,89 @@ impl IntegrityVerifier {
             stats: IntegrityStats::new(),
             config: config,
             countdown: u64::max_value(),
+            counthd: None,
             current: InstructionNumber::new_premise(),
-            original: PathBuf::from("(unknown)"),
-            deferred: PathBuf::from("(unknown)"),
-        }
+            // original: PathBuf::from("(unknown)"),
+            // deferred: PathBuf::from("(unknown)"),
+        };
+        verifier
     }
     pub fn check<L: AsrLexer, M: AsrLexer>(&mut self, mut cnf: AsrParser<L>, mut asr: AsrParser<M>) {
-        // Set the path to the CNF formula as the reference for error-reporting.
-        self.original = cnf.path().to_path_buf();
-        // Check the CNF formula.
-        self.check_cnf(&mut cnf);
-        // Make a new buffer.
         let mut buffer = ProofBuffer::new();
-        // Set the path to the ASR proof as the reference for error-reporting...
-        self.original = asr.path().to_path_buf();
-        // ... and possibly use the 'p source' header as a deferred reference.
-        self.deferred = if let Some((_, src)) = asr.parse_source_header() {
-            PathBuf::from(src)
-        } else {
-            PathBuf::from("(unknown)")
-        };
-        let count_header = asr.parse_count_header(!self.config.preprocessing);
-        if let Some((_, total)) = count_header {
-            self.countdown = self.config.lower(total);
+        {
+            self.check_cnf(&mut cnf);
         }
-        // Check the ASR core, storing any delayed instructions in the buffer.
-        self.check_asr_core(&mut asr, &mut buffer);
-        // Temporarily set alternative paths for error-reporting.
-        let mut temp_path = PathBuf::from("(buffer)");
-        mem::swap(&mut self.original, &mut temp_path);
-        mem::swap(&mut self.deferred, &mut temp_path);
-        // Check the ASR proof fragment corresponding to the buffer.
-        let buffer_input = InputReader::new(buffer.reader(), &self.original, false);
-        let mut buffer_ps = AsrParser::new(UnbufferedAsrBinaryLexer::new(buffer_input));
-        self.check_asr_proof(&mut buffer_ps, true);
-        // Restore the alternative paths for error-reporting, and drop all structures related to buffering.
-        mem::swap(&mut self.deferred, &mut temp_path);
-        mem::swap(&mut self.original, &mut temp_path);
-        mem::drop(temp_path);
-        mem::drop(buffer_ps);
-        // Check the rest of the ASR proof.
-        self.check_asr_proof(&mut asr, false);
-        if let None = self.stats.first_qed {
-            self.missing_qed(asr.position())
+        {
+            self.counthd = asr.parse_count_header(!self.config.preprocessing);
+            if let Some((_, total)) = self.counthd {
+                self.countdown = self.config.lower(total);
+            }
+            self.check_asr_core(&mut asr, &mut buffer);
         }
-        if let Some((pos, total)) = count_header {
-            if total != self.stats.num_cores + self.stats.num_instructions {
-                self.invalid_num_instructions(pos, total);
+        {
+            let path = asr.position().path().clone();
+            let buffer_input = InputReader::new(buffer.reader(), path, false);
+            let mut buffer_ps = AsrParser::new(UnbufferedAsrBinaryLexer::new(buffer_input));
+            self.check_asr_proof(&mut buffer_ps, true);
+        }
+        {
+            self.check_asr_proof(&mut asr, false);
+            if let None = self.stats.first_qed {
+                self.missing_qed(asr.position())
+            }
+            if let Some((_, total)) = &self.counthd {
+                if *total != self.stats.num_cores + self.stats.num_instructions {
+                    self.invalid_num_instructions();
+                }
             }
         }
     }
+
+    // pub fn check<L: AsrLexer, M: AsrLexer>(&mut self, mut cnf: AsrParser<L>, mut asr: AsrParser<M>) {
+    //     // Set the path to the CNF formula as the reference for error-reporting.
+    //     self.original = cnf.path().to_path_buf();
+    //     // Check the CNF formula.
+    //     self.check_cnf(&mut cnf);
+    //     // Make a new buffer.
+    //     let mut buffer = ProofBuffer::new();
+    //     // Set the path to the ASR proof as the reference for error-reporting...
+    //     self.original = asr.path().to_path_buf();
+    //     // ... and possibly use the 'p source' header as a deferred reference.
+    //     self.deferred = if let Some((_, src)) = asr.parse_source_header() {
+    //         PathBuf::from(src)
+    //     } else {
+    //         PathBuf::from("(unknown)")
+    //     };
+    //     let count_header = asr.parse_count_header(!self.config.preprocessing);
+    //     if let Some((_, total)) = count_header {
+    //         self.countdown = self.config.lower(total);
+    //     }
+    //     // Check the ASR core, storing any delayed instructions in the buffer.
+    //     self.check_asr_core(&mut asr, &mut buffer);
+    //     // Temporarily set alternative paths for error-reporting.
+    //     let mut temp_path = PathBuf::from("(buffer)");
+    //     mem::swap(&mut self.original, &mut temp_path);
+    //     mem::swap(&mut self.deferred, &mut temp_path);
+    //     // Check the ASR proof fragment corresponding to the buffer.
+    //     let buffer_input = InputReader::new(buffer.reader(), &self.original, false);
+    //     let mut buffer_ps = AsrParser::new(UnbufferedAsrBinaryLexer::new(buffer_input));
+    //     self.check_asr_proof(&mut buffer_ps, true);
+    //     // Restore the alternative paths for error-reporting, and drop all structures related to buffering.
+    //     mem::swap(&mut self.deferred, &mut temp_path);
+    //     mem::swap(&mut self.original, &mut temp_path);
+    //     mem::drop(temp_path);
+    //     mem::drop(buffer_ps);
+    //     // Check the rest of the ASR proof.
+    //     self.check_asr_proof(&mut asr, false);
+    //     if let None = self.stats.first_qed {
+    //         self.missing_qed(asr.position())
+    //     }
+    //     if let Some((pos, total)) = count_header {
+    //         if total != self.stats.num_cores + self.stats.num_instructions {
+    //             self.invalid_num_instructions(pos, total);
+    //         }
+    //     }
+    // }
     pub fn data(self) -> (IntegrityStats, Option<IntegrityData>) {
         let data = if self.stats.first_qed.is_none() || (!self.config.preprocessing && self.insertions.is_none()) {
             None
@@ -420,10 +454,10 @@ impl IntegrityVerifier {
             self.stats.new_premise();
         }
         if !self.stats.check_variables(cnfvar) {
-            self.invalid_num_variables(cnfpos, cnfvar);
+            self.invalid_num_variables(&cnfpos, cnfvar);
         }
         if !self.stats.check_clauses(cnfcls) {
-            self.invalid_num_clauses(cnfpos, cnfcls);
+            self.invalid_num_clauses(&cnfpos, cnfcls);
         }
         self.stats.record_cnf_time();
     }
@@ -566,78 +600,58 @@ impl IntegrityVerifier {
     }
     fn save_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction, buffer: &mut ProofBuffer) {
         let res = match ins.kind() {
-            ParsedInstructionKind::Core => buffer.core_instruction(*ins.index(), ins.default_position(), asr),
-            ParsedInstructionKind::Rup => buffer.rup_instruction(*ins.index(), ins.default_position(), asr),
-            ParsedInstructionKind::Del => buffer.del_instruction(*ins.index(), ins.default_position(), asr),
-            ParsedInstructionKind::Wsr => buffer.wsr_instruction(*ins.index(), ins.default_position(), asr),
+            ParsedInstructionKind::Core => buffer.core_instruction(*ins.index(), ins.position().origin().clone(), asr),
+            ParsedInstructionKind::Rup => buffer.rup_instruction(*ins.index(), ins.position().origin().clone(), asr),
+            ParsedInstructionKind::Del => buffer.del_instruction(*ins.index(), ins.position().origin().clone(), asr),
+            ParsedInstructionKind::Wsr => buffer.wsr_instruction(*ins.index(), ins.position().origin().clone(), asr),
         };
         if let Err(e) = res {
-            panic!(format!("{}", e))
+            panic!("{}", e)
         }
     }
-    fn invalid_num_variables(&mut self, pos: FilePosition, vars: u32) {
-        self.stats.log_error(IntegrityError::InvalidNumberOfVariables(pos.with_path(&self.original), vars, self.stats.max_var.get()));
+    fn invalid_num_variables(&mut self, pos: &FilePosition, vars: u32) {
+        self.stats.log_error(IntegrityError::InvalidNumberOfVariables(pos.clone(), vars, self.stats.max_var.get()));
     }
-    fn invalid_num_clauses(&mut self, pos: FilePosition, cls: u64) {
-        self.stats.log_error(IntegrityError::InvalidNumberOfClauses(pos.with_path(&self.original), cls, self.stats.num_premises));
+    fn invalid_num_clauses(&mut self, pos: &FilePosition, cls: u64) {
+        self.stats.log_error(IntegrityError::InvalidNumberOfClauses(pos.clone(), cls, self.stats.num_premises));
     }
-    fn invalid_num_instructions(&mut self, pos: FilePosition, num: u64) {
-        self.stats.log_error(IntegrityError::InvalidNumberOfInstructions(pos.with_path(&self.original), num, self.stats.num_cores + self.stats.num_instructions));
+    fn invalid_num_instructions(&mut self) {
+        let (pos, num) = self.counthd.as_ref().unwrap();
+        self.stats.log_error(IntegrityError::InvalidNumberOfInstructions(pos.clone(), *num, self.stats.num_cores + self.stats.num_instructions));
     }
     fn invalid_clause(&mut self, data: Either<&FilePosition, &ParsedInstruction>) {
         let (clause, reps, confs) = self.clause.extract();
-        let pos = data.either(|pos| pos.with_path(&self.original).deferred(), |ins| ins.position(&self.original, &self.deferred));
+        let pos = data.either(
+            |pos| pos.deferred(),
+            |ins| ins.position().clone()
+        );
         let id = data.either(|_| None, |ins| Some(*ins.index()));
         self.stats.log_error(IntegrityError::InvalidClause(pos, id, self.current, clause, reps, confs));
     }
     fn invalid_witness(&mut self, ins: &ParsedInstruction) {
         let (witness, reps, confs) = self.witness.extract();
-        let pos = ins.position(&self.original, &self.deferred);
+        let pos = ins.position().clone();
         self.stats.log_error(IntegrityError::InvalidWitness(pos, *ins.index(), self.current, witness, reps, confs));
     }
     fn conflicting_id(&mut self, ins: &ParsedInstruction) {
-        let pos = ins.position(&self.original, &self.deferred);
+        let pos = ins.position().clone();
         self.stats.log_error(IntegrityError::ConflictingId(pos, *ins.index(), self.current));
     }
     fn missing_chain_id(&mut self, lat_id: Option<ClauseIndex>, ins: &ParsedInstruction) {
         let (chain, missing) = self.chain.extract();
-        let pos = ins.position(&self.original, &self.deferred);
+        let pos = ins.position().clone();
         self.stats.log_error(IntegrityError::ChainMissingId(pos, *ins.index(), self.current, lat_id, chain, missing));
     }
     fn invalid_lateral_id(&mut self, ins: &ParsedInstruction) {
         let (laterals, miss_chain, miss_del, reps) = self.mchain.extract();
-        let pos = ins.position(&self.original, &self.deferred);
+        let pos = ins.position().clone();
         self.stats.log_error(IntegrityError::InvalidLateralId(pos, *ins.index(), self.current, laterals, miss_chain, miss_del, reps));
     }
     fn missing_deletion_id(&mut self, ins: &ParsedInstruction) {
-        let pos = ins.position(&self.original, &self.deferred);
+        let pos = ins.position().clone();
         self.stats.log_error(IntegrityError::MissingDeletionId(pos, *ins.index(), self.current));
     }
-    fn missing_qed(&mut self, pos: FilePosition) {
-        self.stats.log_error(IntegrityError::MissingQed(pos.with_path(&self.original)));
+    fn missing_qed(&mut self, pos: &FilePosition) {
+        self.stats.log_error(IntegrityError::MissingQed(pos.clone()));
     }
 }
-
-// #[cfg(test)]
-// mod test {
-//     fn check_instance(cnf: &Path, asr: &Path) {
-//         let cnf_file = File::open(cnf);
-//         let cnf_input = InputReader::new(cnf_file, cnf, false);
-//         let cnf_parser = AsrParser::new(cnf_input);
-//         let asr_file = File::open(asr);
-//         let asr_input = InputReader::new(asr_file, asr, false);
-//         let asr_parser = AsrParser::new(asr_input);
-//         let config = IntegrityConfig {
-//             preprocessing: false,
-//             select: 1u64,
-//             parts: 1u64,
-//         };
-//         let checker = IntegrityVerifier::new(config);
-//         checker.check(&mut cnf_parser, &mut asr_parser);
-
-//     }
-//     #[test]
-//     fn test_integrity() {
-
-//     }
-// }

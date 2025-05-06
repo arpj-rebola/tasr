@@ -1,7 +1,3 @@
-#![feature(generic_associated_types)]
-#![feature(map_first_last)]
-#![feature(maybe_uninit_ref)]
-#![feature(ptr_offset_from)]
 #![feature(core_intrinsics)]
 #![allow(non_upper_case_globals)]
 #![allow(incomplete_features)]

@@ -1,56 +1,143 @@
 use std::{
     io::{self, Result as IoResult, BufReader, Write, BufWriter, Read, Stdout, Stderr, StderrLock, StdoutLock, Bytes},
     path::{PathBuf, Path},
-    fmt::{self, Display, Result as FmtResult, Formatter, Arguments as FmtArguments},
+    fmt::{self, Display, Debug, Result as FmtResult, Formatter, Arguments as FmtArguments},
     sync::{Mutex},
+    convert::{TryFrom},
 };
+use owning_ref::{MutexGuardRef};
 
-#[derive(Copy, Clone, Debug)]
-pub struct FilePosition {
-    /// The first LSB marks whether this file is binary.
-    /// The second LSB marks whether EOF has been reached.
-    /// The rest of the integer is the line number, in the case of a text file, or the byte, in the case of a binary file.
+lazy_static! {
+    pub static ref FilePathDb: Mutex<Vec<PathBuf>> = {
+        Mutex::new(Vec::<PathBuf>::new())
+    };
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct FilePath {
+    off: usize
+}
+impl FilePath {
+    #[inline(always)]
+    pub fn new(path: PathBuf) -> FilePath {
+        let mut lock = FilePathDb.lock().unwrap();
+        let off = lock.len();
+        lock.push(path);
+        FilePath { off: off }
+    }
+    #[inline(always)]
+    pub fn unknown() -> FilePath {
+        FilePath { off: usize::max_value() }
+    }
+    #[inline(always)]
+    pub fn path<'a, 'b: 'a>(&'b self) -> MutexGuardRef<'a, Vec<PathBuf>, Path> {
+        MutexGuardRef::new(FilePathDb.lock().unwrap()).map(
+            |mg| mg.get(self.off).map_or_else(|| Path::new("(unknown)"), |pb| pb.as_path())
+        )
+    }
+    #[inline(always)]
+    pub fn join(&self, postfix: &Path) -> FilePath {
+        let newpath = {
+            let lock = FilePathDb.lock().unwrap();
+            let prefix = lock.get(self.off).map_or_else(|| Path::new("(unknown)"), |pb| pb.as_path());
+            prefix.join(postfix)
+        };
+        FilePath::new(newpath)
+    }
+}
+impl Display for FilePath {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let lock = FilePathDb.lock().unwrap();
+        let path = lock.get(self.off).map_or_else(|| Path::new("(unknown)"), |pb| pb.as_path());
+        write!(f, "{}", path.display())
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct FileOffset {
     val: u64
+}
+impl FileOffset {
+    unsafe fn new(num: u64) -> FileOffset {
+        FileOffset { val: num & !1u64 }
+    }
+    fn put(self, num: &mut u64) {
+        *num &= 1u64;
+        *num |= self.val;
+    }
+}
+impl TryFrom<i64> for FileOffset {
+    type Error = i64;
+    fn try_from(num: i64) -> Result<FileOffset, i64> {
+        if num >= 0i64 {
+            Ok(FileOffset { val: (num as u64) << 1 })
+        } else {
+            Err(num)
+        }
+    }
+}
+impl Debug for FileOffset {
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+		write!(f, "{}", self.val >> 1)
+	}
+}
+
+#[derive(Clone, Copy)]
+pub struct FilePosition {
+    pos: u64,
+    file: FilePath,
 }
 impl FilePosition {
     #[inline(always)]
-    pub fn new(binary: bool) -> FilePosition {
-        FilePosition { val: if binary { 0b000u64 } else { 0b101u64 } }
+    pub fn new(binary: bool, path: FilePath) -> FilePosition {
+        FilePosition {
+            pos: if binary { 0b01u64 } else { 0b10u64 },
+            file: path,
+        }
+    }
+    #[inline(always)]
+    pub fn offset(&self) -> FileOffset {
+        unsafe { FileOffset::new(self.pos) }
+    }
+    #[inline(always)]
+    pub fn set_offset(&mut self, off: FileOffset) {
+        off.put(&mut self.pos)
+    }
+    #[inline(always)]
+    pub fn binary_file(&self) -> bool {
+        self.pos & 1u64 == 1u64
+    }
+    #[inline(always)]
+    pub fn finished(&self) -> bool {
+        self.pos & !1u64 == !1u64
+    }
+    #[inline(always)]
+    pub fn path(&self) -> &FilePath {
+        &self.file
+    }
+    #[inline(always)]
+    pub fn text(&self) -> TextFilePosition<'_> {
+        TextFilePosition(self)
+    }
+    #[inline(always)]
+    pub fn deferred(&self) -> DeferredFilePosition {
+        DeferredFilePosition::new_origin(self.clone())
     }
     #[inline(always)]
     fn advance(&mut self, c: u8) {
-        if self.binary() || c == b'\n' {
-            self.val += 4u64
+        if self.binary_file() || c == b'\n' {
+            self.pos += 2u64
         }
     }
-    /// Sets a flag that EOF has been reached.
     #[inline(always)]
     fn finish(&mut self) {
-        self.val |= 0b10u64
+        self.pos |= !1u64
     }
-    /// Checks if the file is binary.
-    #[inline(always)]
-    pub fn binary(&self) -> bool {
-        self.val & 0b01u64 == 0u64
-    }
-    /// Checks if EOF has been reached.
-    #[inline(always)]
-    pub fn finished(&self) -> bool {
-        self.val & 0b10u64 != 0u64
-    }
-    /// Returns the current offset, or `None` if EOF has been reached.
-    pub fn offset(&self) -> Option<u64> {
-        if self.finished() {
-            None
-        } else {
-            Some(self.val >> 2)
-        }
-    }
-    pub fn text(&self) -> FilePositionText<'_> {
-        FilePositionText(self)
-    }
-    pub fn as_binary<W: Write>(&self, w: &mut W) -> IoResult<()> {
-		let mut num: u64 = self.val << 1;
+	#[inline]
+	pub fn binary<W: Write>(&self, w: &mut W) -> IoResult<()> {
+		let mut num: u64 = self.pos << 1;
 		loop {
 			let c = (num & 0b0111_1111u64) as u8;
 			num >>= 7;
@@ -60,96 +147,72 @@ impl FilePosition {
 				return Ok(())
 			}
 		}
-    }
-    pub fn with_path(self, path: &Path) -> PathFilePosition {
-        PathFilePosition {
-            path: path.to_path_buf(),
-            offset: self,
-        }
-    }
-}
-impl From<i64> for FilePosition {
-    fn from(num: i64) -> FilePosition {
-        FilePosition { val: num as u64 }
-    }
+	}
 }
 impl Display for FilePosition {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}: ", &self.file)?;
 		if self.finished() {
 			write!(f, "EOF")
         } else {
-            let word = if self.binary() { "byte" } else { "line" };
-            write!(f, "{} {}", word, self.val >> 2)
+            let word = if self.binary_file() { "byte" } else { "line" };
+            write!(f, "{} {}", word, self.pos >> 1)
+        }
+    }
+}
+impl Debug for FilePosition {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}: ", &self.file)?;
+		if self.finished() {
+			write!(f, "EOF")
+        } else {
+            let word = if self.binary_file() { "byte" } else { "line" };
+            write!(f, "{} {}", word, self.pos >> 1)
         }
     }
 }
 
-pub struct FilePositionText<'a>(&'a FilePosition);
-impl<'a> Display for FilePositionText<'a> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", self.0.val)
-    }
+pub struct TextFilePosition<'a>(&'a FilePosition);
+impl<'a> Display for TextFilePosition<'a> {
+	fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+		write!(f, "{}", self.0.pos >> 1)
+	}
 }
 
-pub struct PathFilePosition {
-    path: PathBuf,
-    offset: FilePosition
+#[derive(Clone, Debug)]
+pub struct DeferredFilePosition {
+    prec: Option<FilePosition>,
+    curr: FilePosition,
 }
-impl PathFilePosition {
-    pub fn new(path: &Path, binary: bool) -> PathFilePosition {
-        PathFilePosition {
-            path: path.to_path_buf(),
-            offset: FilePosition::new(binary),
+impl DeferredFilePosition {
+    #[inline(always)]
+    pub fn new_derived(curr: FilePosition, prec: FilePosition) -> DeferredFilePosition {
+        DeferredFilePosition {
+            prec: Some(prec),
+            curr: curr
         }
     }
-    pub fn path(&self) -> &Path {
-        self.path.as_path()
-    }
-    pub fn offset(&self) -> FilePosition {
-        self.offset
+    #[inline(always)]
+    pub fn new_origin(curr: FilePosition) -> DeferredFilePosition {
+        DeferredFilePosition {
+            prec: None,
+            curr: curr,
+        }
     }
     #[inline(always)]
-    fn advance(&mut self, c: u8) {
-        self.offset.advance(c)
-    }
-    /// Sets a flag that EOF has been reached.
-    #[inline(always)]
-    pub fn finish(&mut self) {
-        self.offset.finish()
-    }
-    /// Checks if the file is binary.
-    #[inline(always)]
-    pub fn binary(&self) -> bool {
-        self.offset.binary()
-    }
-    /// Checks if EOF has been reached.
-    #[inline(always)]
-    pub fn finished(&self) -> bool {
-        self.offset.finished()
-    }
-    pub fn deferred(self) -> DeferredPosition {
-        DeferredPosition(self, None)
+    pub fn origin(&self) -> &FilePosition {
+        if let Some(x) = &self.prec {
+            x
+        } else {
+            &self.curr
+        }
     }
 }
-impl Display for PathFilePosition {
+impl Display for DeferredFilePosition {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}: {}", self.path.display(), self.offset)
-    }
-}
-
-pub struct DeferredPosition(PathFilePosition, Option<PathFilePosition>);
-impl DeferredPosition {
-    pub fn with_paths(ofp: FilePosition, dfp: Option<FilePosition>, opath: &Path, dpath: &Path) -> DeferredPosition {
-        let opfp = ofp.with_path(opath);
-        let dpfp = dfp.map(|fp| fp.with_path(dpath));
-        DeferredPosition(opfp, dpfp)
-    }
-}
-impl Display for DeferredPosition {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", &self.0)?;
-        if let Some(pfp) = &self.1 {
-            write!(f, " (originally from {})", pfp)?;
+        write!(f, "{}", &self.curr)?;
+        if let Some(pos) = &self.prec {
+            write!(f, " (originally from {})", pos)?;
         }
         Ok(())
     }
@@ -159,30 +222,25 @@ impl Display for DeferredPosition {
 pub struct InputReader<R> where R: Read {
     it: Bytes<BufReader<R>>,
     /// File position of the last read item.
-	pos: PathFilePosition,
+	pos: FilePosition,
 }
 impl<R> InputReader<R> where
     R: Read
 {
     /// Creates a new instance from a reader.
-    pub fn new(reader: R, path: &Path, binary: bool) -> InputReader<R> {
+    pub fn new(reader: R, path: FilePath, binary: bool) -> InputReader<R> { 
         InputReader {
             it: BufReader::with_capacity(1usize << 20, reader).bytes(),
-            pos: PathFilePosition::new(path, binary),
+            pos: FilePosition::new(binary, path),
         }
     }
-    
     #[inline(always)]
-    pub fn path(&self) -> &Path {
-        self.pos.path()
-    }
-    /// Returns a copy of the current file position.
-	pub fn position(&self) -> FilePosition {
-		self.pos.offset()
+	pub fn position(&self) -> &FilePosition {
+		&self.pos
     }
     /// Checks if the file is binary.
-    pub fn binary(&self) -> bool {
-        self.pos.binary()
+    pub fn binary_file(&self) -> bool {
+        self.pos.binary_file()
     }
 }
 impl<R> Iterator for InputReader<R> where
@@ -199,35 +257,32 @@ impl<R> Iterator for InputReader<R> where
                 self.pos.finish();
                 None
             },
-            Some(Err(err)) => panic!(format!("{}", err)),
+            Some(Err(err)) => panic!("{}", err),
         }
 	}
 }
 
 /// Writes to a buffered output sink identified through a path, and manages panics on error.
-pub struct OutputWriter<'a, W: Write> {
+pub struct OutputWriter<W: Write> {
     /// Buffered writer
     buf: BufWriter<W>,
-    /// Identifying path
-    path: &'a Path,
 }
-impl<'a, W: Write> OutputWriter<'a, W> {
-	pub fn new(wt: W, path: &'a Path) -> OutputWriter<'a, W> {
-		OutputWriter::<'a, W>::with_capacity(wt, path, 1usize << 20)
+impl<'a, W: Write> OutputWriter<W> {
+	pub fn new(wt: W) -> OutputWriter<W> {
+		OutputWriter::<W>::with_capacity(wt, 1usize << 20)
     }
-    pub fn with_capacity(wt: W, path: &'a Path, cap: usize) -> OutputWriter<'a, W> {
-		OutputWriter::<'a> {
+    pub fn with_capacity(wt: W, cap: usize) -> OutputWriter<W> {
+		OutputWriter::<W> {
             buf: BufWriter::with_capacity(cap, wt),
-            path: path,
 		}
     }
 }
-impl<'a, W: Write> Write for OutputWriter<'a, W> {
+impl<W: Write> Write for OutputWriter<W> {
 	fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
-		Ok(self.buf.write(buf).unwrap_or_else(|err| panic!(format!("{}", err))))
+		Ok(self.buf.write(buf).unwrap_or_else(|err| panic!("{}", err)))
 	}
 	fn flush(&mut self) -> IoResult<()> {
-		Ok(self.buf.flush().unwrap_or_else(|err| panic!(format!("{}", err))))
+		Ok(self.buf.flush().unwrap_or_else(|err| panic!("{}", err)))
 	}
 }
 
@@ -266,12 +321,12 @@ impl OutputHandle {
     }
     pub fn out(&self, args: FmtArguments) -> StdoutLock {
         let mut lock = self.stdout.lock();
-        lock.write_fmt(args).unwrap_or_else(|err| panic!(format!("{}", err)));
+        lock.write_fmt(args).unwrap_or_else(|err| panic!("{}", err));
         lock
     }
     pub fn err(&self, args: FmtArguments) -> StderrLock {
         let mut lock = self.stderr.lock();
-        lock.write_fmt(args).unwrap_or_else(|err| panic!(format!("{}", err)));
+        lock.write_fmt(args).unwrap_or_else(|err| panic!("{}", err));
         lock
     }
     pub fn maybe_out(&self, args: FmtArguments) -> Option<StdoutLock> {
@@ -327,14 +382,14 @@ impl Display for PrintedPanic {
 #[macro_export]
 macro_rules! breakline {
     ($lock: expr) => {
-        std::io::Write::write_fmt(&mut $lock, format_args!("\n  ")).unwrap_or_else(|err| panic!(format!("{}", err)))
+        std::io::Write::write_fmt(&mut $lock, format_args!("\n  ")).unwrap_or_else(|err| panic!("{}", err))
     }
 }
 
 #[macro_export]
 macro_rules! append {
     ($lock: expr, $($args: expr),*) => {
-        std::io::Write::write_fmt(&mut $lock, format_args!("{}", format!($($args),*))).unwrap_or_else(|err| panic!(format!("{}", err)))
+        std::io::Write::write_fmt(&mut $lock, format_args!("{}", format!($($args),*))).unwrap_or_else(|err| panic!("{}", err))
     }
 }
 
@@ -348,7 +403,7 @@ macro_rules! headed_message {
                 breakline!($lock);
             }
             $block
-            std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!(format!("{}", err)));
+            std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!("{}", err));
             $after($lock)
         } else {
             let $lock = ();
@@ -363,7 +418,7 @@ macro_rules! headed_message {
                 breakline!($lock);
             }
             $block
-            std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!(format!("{}", err)));
+            std::io::Write::write_fmt(&mut $lock, format_args!("\n\n")).unwrap_or_else(|err| panic!("{}", err));
             $after($lock)
         } else {
             let $lock = ();
@@ -378,7 +433,7 @@ macro_rules! create_message {
         headed_message!(|lock| Some($crate::io::PrintedPanic::new(lock)),
             |msg| ::colored::Colorize::bold(::colored::Colorize::red(msg)), "Fatal error:",
             |msg| ::colored::Colorize::bold(msg), $title,
-            $pos, $lock, $block, |lock| panic!(lock))
+            $pos, $lock, $block, |lock| std::panic::panic_any(lock))
     }};
     (fatal @ $title: literal, $pos: expr, $lock: ident, $block: block) => {{
         headed_message!(|lock| $crate::io::MainOutput.maybe_err(lock),
@@ -423,7 +478,7 @@ macro_rules! panick {
         create_message!(panick @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(panick @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
+        create_message!(panick @ $title, Option::<&$crate::io::FilePosition>::None, $lock, $block)
     };
 }
 
@@ -433,7 +488,7 @@ macro_rules! fatal {
         create_message!(fatal @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(fatal @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
+        create_message!(fatal @ $title, Option::<&$crate::io::FilePosition>::None, $lock, $block)
     };
 }
 
@@ -443,7 +498,7 @@ macro_rules! error {
         create_message!(error @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(error @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
+        create_message!(error @ $title, Option::<&$crate::io::FilePosition>::None, $lock, $block)
     };
 }
 
@@ -453,7 +508,7 @@ macro_rules! warning {
         create_message!(warning @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(warning @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
+        create_message!(warning @ $title, Option::<&$crate::io::FilePosition>::None, $lock, $block)
     };
 }
 
@@ -463,7 +518,7 @@ macro_rules! info {
         create_message!(info @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(info @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
+        create_message!(info @ $title, Option::<&$crate::io::FilePosition>::None, $lock, $block)
     };
 }
 
@@ -473,7 +528,7 @@ macro_rules! success {
         create_message!(success @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(success @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
+        create_message!(success @ $title, Option::<&$crate::io::FilePosition>::None, $lock, $block)
     };
 }
 
@@ -483,46 +538,7 @@ macro_rules! progress {
         create_message!(progress @ $title, Some(&$pos), $lock, $block)
     };
     ($title: literal, $lock: ident, $block: block) => {
-        create_message!(progress @ $title, Option::<&$crate::io::PathFilePosition>::None, $lock, $block)
+        create_message!(progress @ $title, Option::<&$crate::io::FilePosition>::None, $lock, $block)
     };
 }
 
-
-#[cfg(test)]
-pub mod test {
-    use std::{
-        fs::{File},
-        path::{Path},
-        io::{Write},
-    };
-	use crate::{
-		io::{InputReader, OutputWriter},
-	};
-
-	#[test]
-	fn test_input() {
-        let file = File::open(Path::new("test/file_reader/filereader.txt")).unwrap();
-        let mut reader = InputReader::new(file, &Path::new("test/file_reader/filereader.txt"), false);
-        let check = [b't', b'h', b'i', b's', b'\n', b'i', b's', b' ', b'a', b'\n', b't', b'e', b's', b't', b'\n', b'f', b'i', b'l', b'e'];
-        assert!(!reader.binary());
-        let mut count = 0u64;
-        while let Some(c) = reader.next() {
-            assert!(&c == check.get(count as usize).unwrap());
-            count += 1u64;
-            assert!((count / 5u64) + 1u64 == reader.position().offset().unwrap());
-        }
-        assert!(count == 19u64);
-        assert!(reader.position().finished())
-    }
-
-    #[test]
-    fn test_output() {
-        let mut vec = Vec::<u8>::new();
-        {
-            let mut writer = OutputWriter::new(&mut vec, Path::new("some/path"));
-            write!(&mut writer, "this\nis a\ntest\nfile").unwrap();
-            writer.flush().unwrap();
-        }
-        assert!(vec == [b't', b'h', b'i', b's', b'\n', b'i', b's', b' ', b'a', b'\n', b't', b'e', b's', b't', b'\n', b'f', b'i', b'l', b'e']);
-    }
-}

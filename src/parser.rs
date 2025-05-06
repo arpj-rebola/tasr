@@ -1,10 +1,10 @@
 use std::{
-    path::{Path},
+    path::{PathBuf},
     intrinsics::{self},
 };
 
 use crate::{
-    io::{FilePosition, DeferredPosition},
+    io::{FilePosition, DeferredFilePosition, FilePath},
     basic::{Literal, Variable, ClauseIndex},
     lexer::{AsrLexer, Lexeme},
 };
@@ -20,17 +20,15 @@ pub enum ParsedInstructionKind {
 pub struct ParsedInstruction {
     kind: ParsedInstructionKind,
     id: ClauseIndex,
-    ofp: FilePosition,
-    dfp: Option<FilePosition>,
+    pos: DeferredFilePosition,
 }
 impl ParsedInstruction {
     #[inline(always)]
-    fn new(kind: ParsedInstructionKind, id: ClauseIndex, ofp: FilePosition, dfp: Option<FilePosition>) -> ParsedInstruction {
+    fn new(kind: ParsedInstructionKind, id: ClauseIndex, pos: DeferredFilePosition) -> ParsedInstruction {
         ParsedInstruction {
             kind: kind,
             id: id,
-            ofp: ofp,
-            dfp: dfp,
+            pos: pos,
         }
     }
     #[inline(always)]
@@ -41,28 +39,29 @@ impl ParsedInstruction {
     pub fn index(&self) -> &ClauseIndex {
         &self.id
     }
-    pub fn position(&self, original: &Path, deferred: &Path) -> DeferredPosition {
-        DeferredPosition::with_paths(self.ofp, self.dfp, original, deferred)
-    }
-    pub fn default_position(&self) -> FilePosition {
-        if let Some(fp) = self.dfp {
-            fp
-        } else {
-            self.ofp
-        }
+    pub fn position(&self) -> &DeferredFilePosition {
+        &self.pos
     }
 }
 
 pub struct AsrParser<L: AsrLexer> {
     lexer: L,
+    source: FilePath,
 }
 impl<L: AsrLexer> AsrParser<L> {
     pub fn new(lexer: L) -> AsrParser<L> {
-        AsrParser::<L> { lexer: lexer }
+        let mut p = AsrParser::<L> {
+            lexer: lexer,
+            source: FilePath::unknown(),
+        };
+        if let Some((_, src)) = p.parse_source_header() {
+            p.source = FilePath::new(PathBuf::from(src));
+        }
+        p
     }
     pub fn parse_cnf_header(&mut self) -> (FilePosition, u32, u64) {
         let pos = match self.lexer.peek().as_this_header([b'c', b'n', b'f', 0u8, 0u8, 0u8, 0u8, 0u8]) {
-            Ok(()) => self.lexer.position(),
+            Ok(()) => self.lexer.position().clone(),
             Err(lx) => self.expected_cnf_header(lx),
         };
         self.lexer.consume();
@@ -74,7 +73,7 @@ impl<L: AsrLexer> AsrParser<L> {
     }
     pub fn parse_core_header(&mut self) -> FilePosition {
         let pos = match self.lexer.peek().as_this_header([b'c', b'o', b'r', b'e', 0u8, 0u8, 0u8, 0u8]) {
-            Ok(()) => self.lexer.position(),
+            Ok(()) => self.lexer.position().clone(),
             Err(lx) => self.expected_core_header(lx),
         };
         self.lexer.consume();
@@ -82,7 +81,7 @@ impl<L: AsrLexer> AsrParser<L> {
     }
     pub fn parse_proof_header(&mut self) -> FilePosition {
         let pos = match self.lexer.peek().as_this_header([b'p', b'r', b'o', b'o', b'f', 0u8, 0u8, 0u8]) {
-            Ok(()) => self.lexer.position(),
+            Ok(()) => self.lexer.position().clone(),
             Err(lx) => self.expected_proof_header(lx),
         };
         self.lexer.consume();
@@ -90,7 +89,7 @@ impl<L: AsrLexer> AsrParser<L> {
     }
     pub fn parse_source_header(&mut self) -> Option<(FilePosition, String)> {
         let pos = match self.lexer.peek().as_this_header([b's', b'o', b'u', b'r', b'c', b'e', 0u8, 0u8]) {
-            Ok(()) => self.lexer.position(),
+            Ok(()) => self.lexer.position().clone(),
             Err(_) => None?,
         };
         self.lexer.consume();
@@ -103,7 +102,7 @@ impl<L: AsrLexer> AsrParser<L> {
     }
     pub fn parse_count_header(&mut self, forced: bool) -> Option<(FilePosition, u64)> {
         let pos = match self.lexer.peek().as_this_header([b'c', b'o', b'u', b'n', b't', 0u8, 0u8, 0u8]) {
-            Ok(()) => self.lexer.position(),
+            Ok(()) => self.lexer.position().clone(),
             Err(_) if !forced => None?,
             Err(lx) => self.expected_count_header(lx),
         };
@@ -117,7 +116,7 @@ impl<L: AsrLexer> AsrParser<L> {
     }
     pub fn parse_premise(&mut self) -> Option<FilePosition> {
         match self.lexer.peek() {
-            Lexeme::Number(_) => Some(self.lexer.position()),
+            Lexeme::Number(_) => Some(self.lexer.position().clone()),
             Lexeme::Eof => None,
             lx => self.expected_premise(lx),
         }
@@ -131,19 +130,24 @@ impl<L: AsrLexer> AsrParser<L> {
             Lexeme::Header(_) | Lexeme::Eof => None,
             lx => self.expected_instruction(core, proof, lx),
         }?;
-        let pos = self.lexer.position();
+        let pos = self.lexer.position().clone();
         self.lexer.consume();
         let id = self.lexer.peek().as_index().unwrap_or_else(|lx| self.expected_instruction_id(lx));
         self.lexer.consume();
-        let ln = if let Lexeme::Letter(b'l') = self.lexer.peek() {
+        let dpos = if let Lexeme::Letter(b'l') = self.lexer.peek() {
             self.lexer.consume();
-            let ln = Some(self.lexer.peek().as_file_position().unwrap_or_else(|lx| self.expected_file_position(lx)));
+            let off = self.lexer.peek().as_file_offset().unwrap_or_else(|lx| self.expected_file_position(lx));
             self.lexer.consume();
-            ln
+            let def = {
+                let mut def = FilePosition::new(pos.binary_file(), self.source.clone());
+                def.set_offset(off);
+                def
+            };
+            DeferredFilePosition::new_derived(pos, def)
         } else {
-            None
+            DeferredFilePosition::new_origin(pos)
         };
-        Some(ParsedInstruction::new(kind, id, pos, ln))
+        Some(ParsedInstruction::new(kind, id, dpos))
     }
     #[inline]
     pub fn parse_clause(&mut self) -> AsrClauseParser<'_, L> {
@@ -175,40 +179,36 @@ impl<L: AsrLexer> AsrParser<L> {
         }
     }
     #[inline]
-    pub fn path(&self) -> &Path {
-        self.lexer.path()
-    }
-    #[inline]
-    pub fn position(&self) -> FilePosition {
+    pub fn position(&self) -> &FilePosition {
         self.lexer.position()
     }
     fn expected_cnf_header(&self, lx: &Lexeme) -> ! {
-        panick!("expected header" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected header" @ self.lexer.position(), lock, {
             append!(lock, "Expected 'cnf' header, but found {} instead.", lx);
         })
     }
     fn expected_core_header(&self, lx: &Lexeme) -> ! {
-        panick!("expected header" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected header" @ self.lexer.position(), lock, {
             append!(lock, "Expected 'core' header, but found {} instead.", lx);
         })
     }
     fn expected_proof_header(&self, lx: &Lexeme) -> ! {
-        panick!("expected header" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected header" @ self.lexer.position(), lock, {
             append!(lock, "Expected 'proof' header, but found {} instead.", lx);
         })
     }
     fn expected_source_header(&self, lx: &Lexeme) -> ! {
-        panick!("expected source string" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected source string" @ self.lexer.position(), lock, {
             append!(lock, "Expected source string in 'source' header, but found {} instead.", lx);
         })
     }
     fn expected_count_header(&self, lx: &Lexeme) -> ! {
-        panick!("expected count header" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected count header" @ self.lexer.position(), lock, {
             append!(lock, "Expected 'count' header, but found {} instead.", lx);
         })
     }
     fn expected_number_variables(&self, lx: &Lexeme) -> ! {
-        panick!("expected number of variables" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected number of variables" @ self.lexer.position(), lock, {
             match lx {
                 Lexeme::Number(num) => append!(lock, "Parsed a number of variables {} outside of the range [{}..{}]", num, 0i64, Variable::MaxValue),
                 _ => append!(lock, "Expected the number of variables in the formula, but found {} instead.", lx),
@@ -216,7 +216,7 @@ impl<L: AsrLexer> AsrParser<L> {
         })
     }
     fn expected_number_clauses(&self, lx: &Lexeme) -> ! {
-        panick!("expected number of clauses" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected number of clauses" @ self.lexer.position(), lock, {
             match lx {
                 Lexeme::Number(num) => append!(lock, "Parsed a number of clauses {} outside of the range [{}..{}].", num, 0usize, u64::max_value()),
                 _ => append!(lock, "Expected the number of clauses in the formula, but found {} instead.", lx),
@@ -224,7 +224,7 @@ impl<L: AsrLexer> AsrParser<L> {
         })
     }
     fn expected_number_instructions(&self, lx: &Lexeme) -> ! {
-        panick!("expected number of instructions" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected number of instructions" @ self.lexer.position(), lock, {
             match lx {
                 Lexeme::Number(num) => append!(lock, "Parsed a number of instructions {} outside of the range [{}..{}].", num, 0usize, u64::max_value()),
                 _ => append!(lock, "Expected the number of instructions in the proof, but found {} instead.", lx),
@@ -232,12 +232,12 @@ impl<L: AsrLexer> AsrParser<L> {
         })
     }
     fn expected_premise(&self, lx: &Lexeme) -> ! {
-        panick!("expected premise clause" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected premise clause" @ self.lexer.position(), lock, {
             append!(lock, "Expected a new premise clause or EOF, but found {} instead.", lx);
         })
     }
     fn expected_instruction(&self, core: bool, proof: bool, lx: &Lexeme) -> ! {
-        panick!("expected proof instruction" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected proof instruction" @ self.lexer.position(), lock, {
             let msg = match (core, proof) {
                 (true, true) => "Expected RUP instruction 'r', or WSR instruction 'w', or deletion instruction 'd',
                     or core clause instruction 'k', or section header, or EOF",
@@ -250,7 +250,7 @@ impl<L: AsrLexer> AsrParser<L> {
         })
     }
     fn expected_instruction_id(&self, lx: &Lexeme) -> ! {
-        panick!("expected proof instruction identifier" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected proof instruction identifier" @ self.lexer.position(), lock, {
             match lx {
                 Lexeme::Number(num) => append!(lock, "Parsed a clause identifier {} outside of the range [{}..{}]", num, 1i64, ClauseIndex::MaxValue),
                 _ => append!(lock, "Expected a clause identifier for a proof instruction, but found {} instead.", lx),
@@ -258,12 +258,12 @@ impl<L: AsrLexer> AsrParser<L> {
         })
     }
     fn expected_file_position(&self, lx: &Lexeme) -> ! {
-        panick!("expected proof instruction position" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected proof instruction position" @ self.lexer.position(), lock, {
             append!(lock, "Expected a file position for a proof instruction, but found {} instead.", lx);
         })
     }
     fn expected_literal(&self, lx: &Lexeme) -> ! {
-        panick!("expected literal" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected literal" @ self.lexer.position(), lock, {
             match lx {
                 Lexeme::Number(num) => append!(lock, "Parsed a literal {} outside of the range [{}..{}] U [{}..{}].", num, -Literal::MaxValue, -1i64, 1i64, Literal::MaxValue),
                 _ => append!(lock, "Expected a literal, but found {} instead.", lx),
@@ -271,7 +271,7 @@ impl<L: AsrLexer> AsrParser<L> {
         })
     }
     fn expected_variable(&self, lx: &Lexeme) -> ! {
-        panick!("expected literal" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected literal" @ self.lexer.position(), lock, {
             match lx {
                 Lexeme::Number(num) => append!(lock, "Parsed a variable {} outside of the range [{}..{}].", num, 1i64, Variable::MaxValue),
                 _ => append!(lock, "Expected a variable, but found {} instead.", lx),
@@ -279,7 +279,7 @@ impl<L: AsrLexer> AsrParser<L> {
         })
     }
     fn expected_index(&self, lx: &Lexeme) -> ! {
-        panick!("expected clause identifier" @ self.lexer.position().with_path(self.lexer.path()), lock, {
+        panick!("expected clause identifier" @ self.lexer.position(), lock, {
             match lx {
                 Lexeme::Number(num) => append!(lock, "Parsed a clause identifier {} outside of the range [{}..{}].", num, 1i64, ClauseIndex::MaxValue),
                 _ => append!(lock, "Expected a clause identifier, but found {} instead.", lx),

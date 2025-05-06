@@ -1,12 +1,11 @@
 use std::{
-    path::{Path},
     io::{Write},
     time::{Instant, Duration},
 };
 
 use crate::{
     checkerdb::{CheckerDb, ClauseAddress, ChainAddress, WitnessAddress, MultichainAddress},
-    io::{FilePosition, InputReader},
+    io::{FilePosition, InputReader, FilePath},
     idmap::{IndexMapping},
     buffer::{UncheckedClauseBuffer, UncheckedChainBuffer, UncheckedWitnessBuffer, UncheckedMultichainBuffer},
     basic::{InstructionNumber, ClauseIndex},
@@ -151,21 +150,21 @@ impl SplitterBase {
     fn process_core_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let oid = *ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
-        self.idmap.map(oid, clause_addr, ins.default_position()).unwrap();
+        self.idmap.map(oid, clause_addr, ins.position().origin().clone()).unwrap();
     }
     fn process_rup_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let oid = *ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
-        let pos = ins.default_position();
-        let nid = self.idmap.map(oid, clause_addr, pos).unwrap();
+        let pos = ins.position().origin().clone();
+        let nid = self.idmap.map(oid, clause_addr, pos.clone()).unwrap();
         let chain_addr = self.process_chain(asr.parse_chain());
         self.proof.insert_rup(nid, pos, chain_addr);
     }
     fn process_wsr_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction) {
         let oid = *ins.index();
         let clause_addr = self.process_clause(asr.parse_clause());
-        let pos = ins.default_position();
-        let nid = self.idmap.map(oid, clause_addr, pos).unwrap();
+        let pos = ins.position().origin().clone();
+        let nid = self.idmap.map(oid, clause_addr, pos.clone()).unwrap();
         let witness_addr = self.process_witness(asr.parse_witness());
         let mchain_addr = self.process_multichain(asr.parse_multichain(oid), witness_addr);
         self.proof.insert_wsr(nid, pos, mchain_addr);
@@ -222,13 +221,13 @@ impl SplitterBase {
     }
     fn save_instruction<L: AsrLexer>(&mut self, asr: &mut AsrParser<L>, ins: &ParsedInstruction, buffer: &mut ProofBuffer) {
         let res = match ins.kind() {
-            ParsedInstructionKind::Core => buffer.core_instruction(*ins.index(), ins.default_position(), asr),
-            ParsedInstructionKind::Rup => buffer.rup_instruction(*ins.index(), ins.default_position(), asr),
-            ParsedInstructionKind::Del => buffer.del_instruction(*ins.index(), ins.default_position(), asr),
-            ParsedInstructionKind::Wsr => buffer.wsr_instruction(*ins.index(), ins.default_position(), asr),
+            ParsedInstructionKind::Core => buffer.core_instruction(*ins.index(), ins.position().origin().clone(), asr),
+            ParsedInstructionKind::Rup => buffer.rup_instruction(*ins.index(), ins.position().origin().clone(), asr),
+            ParsedInstructionKind::Del => buffer.del_instruction(*ins.index(), ins.position().origin().clone(), asr),
+            ParsedInstructionKind::Wsr => buffer.wsr_instruction(*ins.index(), ins.position().origin().clone(), asr),
         };
         if let Err(e) = res {
-            panic!(format!("{}", e))
+            panic!("{}", e)
         }
     }
     fn init_buffer(&mut self) {
@@ -262,7 +261,7 @@ impl<'a, L: AsrLexer> Splitter<'a, L> {
         let mut base = SplitterBase::new(config);
         base.process_core(&mut asr, buffer);
         base.init_buffer();
-        let mut parser = AsrParser::new(UnbufferedAsrBinaryLexer::new(InputReader::new(buffer.reader(), Path::new("(buffer)"), false)));
+        let mut parser = AsrParser::new(UnbufferedAsrBinaryLexer::new(InputReader::new(buffer.reader(), FilePath::unknown(), false)));
         parser.parse_proof_header();
         Splitter {
             base: base,
@@ -312,7 +311,7 @@ pub struct SplitFragment<'a> {
 }
 impl<'a> SplitFragment<'a> {
     pub fn dump<W: Write>(mut self, wt: &mut W) {
-        self.proof.write_text(&mut self.db, wt).unwrap_or_else(|e| panic!(format!("{}", e)));
+        self.proof.write_text(&mut self.db, wt).unwrap_or_else(|e| panic!("{}", e));
     }
 }
 impl<'a> Drop for SplitFragment<'a> {
